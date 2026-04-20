@@ -609,11 +609,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown",
         )
 
+        # Extract pin code from address string (last 6 digits)
+        import re
+        pin_match = re.search(r'\b(\d{6})\b', address.get("address", ""))
+        pin_code = pin_match.group(1) if pin_match else ZEPTO_PIN or "110001"
+
         loop = asyncio.get_event_loop()
         order = await loop.run_in_executor(
             None,
             lambda: zepto.select_address_and_checkout(
-                address["label"], address["full_address"], address["pin_code"]
+                address["label"], address.get("address", ""), pin_code
             ),
         )
 
