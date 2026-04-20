@@ -143,7 +143,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _trigger_zepto_login(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     """Initiate Zepto OTP login — two phase: send OTP, then wait for reply."""
-    global _otp_future
     loop = asyncio.get_event_loop()
 
     async def do_login():
@@ -177,17 +176,20 @@ async def _trigger_zepto_login(chat_id: int, context: ContextTypes.DEFAULT_TYPE)
             return
 
         # Phase 2: wait for OTP reply in Telegram
-        _otp_future = loop.create_future()
+        otp_future = loop.create_future()
+        context.bot_data["otp_future"] = otp_future
         context.bot_data["awaiting_otp"] = True
 
         try:
-            otp = await asyncio.wait_for(asyncio.wrap_future(_otp_future), timeout=120)
+            otp = await asyncio.wait_for(asyncio.wrap_future(otp_future), timeout=120)
         except asyncio.TimeoutError:
             context.bot_data["awaiting_otp"] = False
+            context.bot_data.pop("otp_future", None)
             await context.bot.send_message(chat_id, "⏰ OTP timed out. Send /start to try again.")
             return
 
         context.bot_data["awaiting_otp"] = False
+        context.bot_data.pop("otp_future", None)
         await context.bot.send_message(chat_id, "⏳ Entering OTP...")
 
         success, msg = await loop.run_in_executor(None, lambda: zepto.complete_login(otp))
@@ -310,10 +312,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Route OTP reply
     if context.bot_data.get("awaiting_otp"):
-        global _otp_future
-        if _otp_future and not _otp_future.done():
-            _otp_future.set_result(text)
-            await update.message.reply_text("✅ OTP received, logging in...")
+        otp_future = context.bot_data.get("otp_future")
+        if otp_future and not otp_future.done():
+            otp_future.set_result(text)
+            logger.info(f"[OTP] Received OTP: {text}")
         return
 
     # Session guard: must be logged in and have address selected
