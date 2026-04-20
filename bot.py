@@ -216,9 +216,8 @@ async def _prompt_address_selection(chat_id: int, context: ContextTypes.DEFAULT_
 
     keyboard = []
     for a in addresses:
-        label = a["label"]
-        area = f" — {a['area']}" if a["area"] else ""
-        keyboard.append([InlineKeyboardButton(f"📍 {label}{area}", callback_data=f"setup_addr_{a['index']}")])
+        full = f"{a['label']} — {a['address']}" if a.get("address") else a["label"]
+        keyboard.append([InlineKeyboardButton(f"📍 {full}", callback_data=f"setup_addr_{a['index']}")])
 
     await context.bot.send_message(
         chat_id,
