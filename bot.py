@@ -154,8 +154,8 @@ async def _trigger_zepto_login(chat_id: int, context: ContextTypes.DEFAULT_TYPE)
     loop = asyncio.get_event_loop()
 
     async def do_login():
-        # Phase 1: navigate to Zepto and trigger OTP
-        await context.bot.send_message(chat_id, f"📲 Opening Zepto and sending OTP to {ZEPTO_PHONE}...")
+        # Phase 1: check cookies / navigate to Zepto and trigger OTP
+        await context.bot.send_message(chat_id, "⏳ Checking Zepto session...")
         success, msg = await loop.run_in_executor(None, lambda: zepto.initiate_login(ZEPTO_PHONE))
         logger.info(f"[Login] Phase1 result: {msg}")
 
@@ -172,6 +172,8 @@ async def _trigger_zepto_login(chat_id: int, context: ContextTypes.DEFAULT_TYPE)
             await _prompt_address_selection(chat_id, context)
             return
 
+        # Need OTP — inform user now that we know OTP was actually sent
+        await context.bot.send_message(chat_id, f"📲 Sending OTP to {ZEPTO_PHONE}...")
         await context.bot.send_message(chat_id, msg)  # "📩 OTP sent... please reply"
 
         # Phase 2: wait for OTP reply in Telegram
