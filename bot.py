@@ -672,12 +672,18 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "address": address,
         }
 
+        cart_items = cart.get_items()
         await query.edit_message_text(
-            f"📦 Going to checkout for *{address['label']}*...\n\n⏳ Loading payment options...",
+            f"📦 Syncing {len(cart_items)} item(s) to Zepto cart...",
             parse_mode="Markdown",
         )
 
         loop = asyncio.get_event_loop()
+        added = await loop.run_in_executor(None, lambda: zepto.sync_cart_to_zepto(cart_items))
+        await context.bot.send_message(
+            chat_id,
+            f"✅ {added}/{len(cart_items)} items synced. Going to checkout...",
+        )
         ok = await loop.run_in_executor(None, zepto.go_to_checkout)
         if not ok:
             await context.bot.send_message(chat_id, "❌ Could not reach checkout. Please try again.")

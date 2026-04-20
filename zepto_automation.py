@@ -713,6 +713,57 @@ class ZeptoAutomation:
             logger.error(f"Failed to view cart: {e}")
             return []
 
+    def sync_cart_to_zepto(self, cart_items: list) -> int:
+        """Re-add local cart items to Zepto's browser cart. Returns count of items added."""
+        added = 0
+        for item in cart_items:
+            name = item.get('product_name', '')
+            if not name:
+                continue
+            try:
+                logger.info(f"[Sync] Adding '{name}' to Zepto cart")
+                self.driver.get(f"{ZEPTO_BASE_URL}/search?query={name.replace(' ', '+')}")
+                time.sleep(4)
+                self._dismiss_popups()
+
+                result = self.driver.execute_script("""
+                    var candidates = Array.from(document.querySelectorAll('div, article, section, li'));
+                    var cards = candidates.filter(function(el) {
+                        var text = el.innerText || '';
+                        var hasPrice = text.includes('₹');
+                        var hasAdd = el.querySelector('button') !== null;
+                        var rect = el.getBoundingClientRect();
+                        return hasPrice && hasAdd && rect.width > 50 && rect.height > 50
+                               && rect.width < 600 && el.children.length >= 2;
+                    });
+                    var seen = {};
+                    var unique = [];
+                    cards.forEach(function(el) {
+                        var rect = el.getBoundingClientRect();
+                        var key = Math.round(rect.top/10) + '_' + Math.round(rect.left/10);
+                        if (!seen[key]) { seen[key] = true; unique.push(el); }
+                    });
+                    if (!unique.length) return false;
+                    var card = unique[0];
+                    var buttons = Array.from(card.querySelectorAll('button'));
+                    var addBtn = buttons.find(function(b) {
+                        var t = (b.innerText || '').trim().toLowerCase();
+                        return t === 'add' || t === '+';
+                    }) || buttons[buttons.length - 1];
+                    if (addBtn) { addBtn.click(); return true; }
+                    return false;
+                """)
+                if result:
+                    added += 1
+                    time.sleep(2)
+                    logger.info(f"[Sync] Added '{name}' to Zepto cart")
+                else:
+                    logger.warning(f"[Sync] Could not add '{name}' to Zepto cart")
+            except Exception as e:
+                logger.error(f"[Sync] Failed for '{name}': {e}")
+        logger.info(f"[Sync] Synced {added}/{len(cart_items)} items to Zepto cart")
+        return added
+
     def go_to_checkout(self) -> bool:
         """Navigate to cart and click Proceed to Checkout."""
         try:
