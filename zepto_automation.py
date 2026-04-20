@@ -640,20 +640,6 @@ class ZeptoAutomation:
             checkout_btn.click()
             time.sleep(3)
 
-            # If address selection/confirmation modal appears, just proceed (address already selected upfront)
-            # Try clicking any "Confirm" or "Continue" button for address confirmation
-            try:
-                confirm_addr_btn = self.driver.find_element(
-                    By.XPATH,
-                    "//button[contains(text(),'Confirm') or contains(text(),'Continue') or contains(text(),'Proceed')]"
-                )
-                confirm_addr_btn.click()
-                time.sleep(2)
-                logger.info("Confirmed pre-selected address at checkout")
-            except NoSuchElementException:
-                # No confirmation step — address already confirmed
-                logger.info("No address confirmation needed — proceeding to payment")
-
             # Proceed to payment
             pay_btn = self.wait.until(
                 EC.element_to_be_clickable((By.XPATH, "//button[contains(text(),'Pay') or contains(text(),'Place Order') or contains(text(),'Confirm')]"))
