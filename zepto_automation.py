@@ -400,6 +400,16 @@ class ZeptoAutomation:
             """)
 
             if not addresses:
+                # Dump modal text to help debug
+                try:
+                    modal_text = self.driver.execute_script("""
+                        var modal = document.querySelector('[role="dialog"],[role="sheet"],[class*="modal"],[class*="drawer"],[class*="sheet"],[class*="bottom"]');
+                        return modal ? modal.innerText.substring(0, 1000) : document.body.innerText.substring(0, 1000);
+                    """)
+                    logger.info(f"[Addresses] Modal text dump: {repr(modal_text)}")
+                except Exception:
+                    pass
+
                 # Hard fallback: grab all text blocks in the modal that look like addresses
                 logger.warning("[Addresses] JS scrape returned nothing — trying text-based fallback")
                 try:
