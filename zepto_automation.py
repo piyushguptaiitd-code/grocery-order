@@ -721,22 +721,25 @@ class ZeptoAutomation:
             return False
 
     def get_browser_cart(self) -> List[dict]:
-        """Scrape current cart items directly from Zepto's browser using JS."""
+        """Click the cart button and scrape items from the resulting cart page/panel."""
         try:
-            # Click cart icon to open cart panel
-            for selector in [
-                (By.XPATH, "//*[@data-testid='cart-icon']"),
-                (By.XPATH, "//*[@data-testid='cart']"),
-                (By.XPATH, "//a[contains(@href,'cart')]"),
-                (By.XPATH, "//*[contains(@aria-label,'cart') or contains(@aria-label,'Cart')]"),
-            ]:
-                try:
-                    el = WebDriverWait(self.driver, 4).until(EC.element_to_be_clickable(selector))
-                    self.driver.execute_script("arguments[0].click();", el)
-                    time.sleep(2)
-                    break
-                except TimeoutException:
-                    continue
+            # Click the floating cart pill (same logic as go_to_checkout)
+            clicked = self.driver.execute_script("""
+                var btn = Array.from(document.querySelectorAll('button, a, div')).find(function(el) {
+                    var t = (el.innerText || '').trim().toLowerCase();
+                    var rect = el.getBoundingClientRect();
+                    return rect.bottom > window.innerHeight * 0.7
+                        && /^cart/.test(t) && /item/.test(t) && rect.width > 80;
+                });
+                if (btn) { btn.click(); return true; }
+                return false;
+            """)
+            if clicked:
+                logger.info("[BrowserCart] Clicked floating cart pill")
+            else:
+                logger.warning("[BrowserCart] Floating pill not found, cart may already be open")
+            time.sleep(3)
+            self.take_screenshot("/tmp/zepto_cart_view.png")
 
             # Scrape cart items via JS
             raw = self.driver.execute_script("""
