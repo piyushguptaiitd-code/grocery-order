@@ -228,7 +228,9 @@ async def _prompt_address_selection(chat_id: int, context: ContextTypes.DEFAULT_
     if not success or not addresses:
         await context.bot.send_message(
             chat_id,
-            "❌ Could not fetch addresses from Zepto.\n\nUse /save_address to add one manually, then /start again."
+            "⚠️ No saved addresses found on Zepto.\n\n"
+            "Please open Zepto and select your delivery location, then type `start` again.\n\n"
+            "Or if you've already selected a location on Zepto, type `start` to continue."
         )
         return
 
