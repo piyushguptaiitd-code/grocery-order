@@ -14,7 +14,7 @@ from telegram.ext import (
     ConversationHandler,
 )
 
-from config import TELEGRAM_BOT_TOKEN
+from config import TELEGRAM_BOT_TOKEN, TELEGRAM_GROUP_ID
 from database import Database
 from cart_manager import CartManager, parse_items
 from address_manager import AddressManager
@@ -48,6 +48,19 @@ _pending_items: list = []
 _active_chat_id: Optional[int] = None
 
 
+def allowed(update: Update) -> bool:
+    """Return True only if the message comes from the configured group."""
+    if not TELEGRAM_GROUP_ID:
+        return True  # No restriction configured — allow all (development mode)
+    return update.effective_chat.id == TELEGRAM_GROUP_ID
+
+
+async def reject(update: Update):
+    """Silently ignore or optionally warn unknown callers."""
+    logger.warning(f"Blocked message from chat_id={update.effective_chat.id}")
+    # Intentionally silent — don't reveal the bot exists to strangers
+
+
 async def cart_timeout_handler(context_ref: dict):
     """Called when cart has been idle for 60 seconds."""
     bot = context_ref["bot"]
@@ -77,6 +90,8 @@ async def cart_timeout_handler(context_ref: dict):
 # ─── Commands ──────────────────────────────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not allowed(update):
+        return await reject(update)
     chat_id = update.effective_chat.id
     user = update.effective_user
 
@@ -106,6 +121,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def view_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not allowed(update):
+        return await reject(update)
     cart: CartManager = context.bot_data.get("cart")
     if not cart:
         await update.message.reply_text("Cart is empty. Type items to start adding!")
@@ -114,6 +131,8 @@ async def view_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not allowed(update):
+        return await reject(update)
     cart: CartManager = context.bot_data.get("cart")
     if cart:
         cart.clear()
@@ -122,6 +141,8 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not allowed(update):
+        return await reject(update)
     orders = db.get_recent_orders()
     if not orders:
         await update.message.reply_text("No past orders yet.")
@@ -135,6 +156,8 @@ async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─── Save Address Flow ──────────────────────────────────────────────────────────
 
 async def save_address_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not allowed(update):
+        return await reject(update)
     await update.message.reply_text("What label for this address? (e.g. Home, Office)")
     return SAVE_ADDRESS_LABEL
 
@@ -170,6 +193,8 @@ async def save_address_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle free-form messages — parse items and start search flow."""
+    if not allowed(update):
+        return await reject(update)
     text = update.message.text.strip()
 
     # Ensure cart exists
@@ -307,6 +332,8 @@ async def process_next_item_by_chat(chat_id: int, context: ContextTypes.DEFAULT_
 # ─── Callback Query Handler ─────────────────────────────────────────────────────
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not allowed(update):
+        return await reject(update)
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -415,6 +442,8 @@ async def handle_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def login(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin command to connect Zepto account."""
+    if not allowed(update):
+        return await reject(update)
     global _otp_future
 
     args = context.args
