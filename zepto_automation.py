@@ -350,76 +350,75 @@ class ZeptoAutomation:
 
     def get_saved_addresses(self) -> tuple:
         """
-        Open Zepto's 'Your Location' modal and scrape the Saved Addresses section.
+        Open Zepto's location modal and scrape saved address cards.
+        Does NOT rely on a 'Saved Addresses' heading — finds cards directly.
         Returns (success: bool, list of {index, label, address})
         """
         try:
             self._open_location_modal()
+            time.sleep(2)
             self.take_screenshot("/tmp/zepto_addresses.png")
 
-            # Find the "Saved Addresses" heading, then get all address cards after it
             addresses = self.driver.execute_script("""
-                // Find 'Saved Addresses' heading
-                var heading = Array.from(document.querySelectorAll('*')).find(function(el) {
-                    return el.childElementCount === 0 &&
-                           (el.innerText || '').trim() === 'Saved Addresses';
-                });
-                if (!heading) return [];
+                // Strategy: find all visible elements inside any dialog/modal/sheet
+                // that look like address cards (short label line + longer address line)
+                var modalRoots = Array.from(document.querySelectorAll(
+                    '[role="dialog"], [role="sheet"], [data-testid*="modal"], [data-testid*="drawer"], ' +
+                    '[class*="modal"], [class*="drawer"], [class*="sheet"], [class*="bottom"]'
+                ));
+                // Fallback: use entire document if no modal found
+                var root = modalRoots.length > 0 ? modalRoots[0] : document.body;
 
-                // Walk up to find the container that holds the address cards
-                var container = heading.parentElement;
-                while (container && container.querySelectorAll('*').length < 5) {
-                    container = container.parentElement;
-                }
-                if (!container) return [];
-
-                // Collect all direct child divs after the heading that look like address cards
-                // Each card has a short label line + longer address line
-                var allText = Array.from(container.querySelectorAll('*')).filter(function(el) {
-                    if (el.childElementCount > 3) return false;
-                    var text = (el.innerText || '').trim();
-                    var lines = text.split('\\n').map(function(l) { return l.trim(); }).filter(Boolean);
-                    var rect = el.getBoundingClientRect();
-                    return (
-                        lines.length >= 2 &&
-                        lines[0].length > 1 && lines[0].length < 30 &&
-                        lines[1].length > 10 &&
-                        rect.width > 80 && rect.height > 20 && rect.height < 150
-                    );
-                });
-
-                // Deduplicate by label
+                var candidates = Array.from(root.querySelectorAll('*'));
                 var seen = {};
                 var result = [];
-                allText.forEach(function(el) {
-                    var lines = (el.innerText || '').trim().split('\\n').map(function(l) { return l.trim(); }).filter(Boolean);
+
+                candidates.forEach(function(el) {
+                    var text = (el.innerText || '').trim();
+                    var lines = text.split('\\n').map(function(l) { return l.trim(); }).filter(Boolean);
+                    if (lines.length < 2) return;
+
                     var label = lines[0];
-                    if (!seen[label]) {
+                    var addr = lines.slice(1).join(', ');
+
+                    // Label: short (2-25 chars), not a generic heading
+                    var labelOk = label.length >= 2 && label.length <= 25;
+                    var notHeading = !/^(saved|your|home|select|add new|addresses|location|deliver)/i.test(label) ||
+                                     label.length <= 15;
+                    // Address: reasonably long
+                    var addrOk = addr.length > 10;
+
+                    var rect = el.getBoundingClientRect();
+                    var visible = rect.width > 60 && rect.height > 15 && rect.height < 200;
+
+                    if (labelOk && notHeading && addrOk && visible && !seen[label]) {
                         seen[label] = true;
-                        result.push({ label: label, address: lines.slice(1).join(', ') });
+                        result.push({ label: label, address: addr });
                     }
                 });
-                return result;
+                return result.slice(0, 10);
             """)
 
             if not addresses:
-                logger.warning("[Addresses] JS scrape returned nothing, falling back to XPath text match")
-                # Fallback: find all elements after the "Saved Addresses" heading
+                # Hard fallback: grab all text blocks in the modal that look like addresses
+                logger.warning("[Addresses] JS scrape returned nothing — trying text-based fallback")
                 try:
-                    heading = self.driver.find_element(By.XPATH, "//*[normalize-space(text())='Saved Addresses']")
-                    # Get parent and look for child containers
-                    parent = heading.find_element(By.XPATH, "./..")
-                    cards = parent.find_elements(By.XPATH, ".//div[.//svg or .//img]")
-                    addresses = []
+                    all_els = self.driver.find_elements(By.XPATH, "//*[string-length(text()) > 5]")
                     seen = set()
-                    for card in cards:
-                        text = card.text.strip()
-                        lines = [l.strip() for l in text.split('\n') if l.strip()]
-                        if len(lines) >= 2 and lines[0] not in seen and len(lines[0]) < 30:
-                            seen.add(lines[0])
-                            addresses.append({"label": lines[0], "address": ', '.join(lines[1:])})
+                    addresses = []
+                    for el in all_els:
+                        try:
+                            if not el.is_displayed():
+                                continue
+                            text = el.text.strip()
+                            lines = [l.strip() for l in text.split('\n') if l.strip()]
+                            if len(lines) >= 2 and 2 <= len(lines[0]) <= 25 and lines[0] not in seen:
+                                seen.add(lines[0])
+                                addresses.append({"label": lines[0], "address": ', '.join(lines[1:])})
+                        except Exception:
+                            continue
                 except Exception as e:
-                    logger.warning(f"[Addresses] Fallback also failed: {e}")
+                    logger.warning(f"[Addresses] Fallback failed: {e}")
 
             result = [{"index": i, "label": a["label"], "address": a.get("address", "")}
                       for i, a in enumerate(addresses or [])]
