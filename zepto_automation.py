@@ -712,6 +712,9 @@ class ZeptoAutomation:
             self._dismiss_popups()
             time.sleep(1)
 
+            logger.info(f"[Checkout] Home page url={self.driver.current_url}")
+            self.take_screenshot("/tmp/zepto_checkout_step1_home.png")
+
             # Step 1: Click the cart summary bar / cart icon to open cart
             cart_opened = False
             for selector in [
@@ -734,6 +737,9 @@ class ZeptoAutomation:
                 except TimeoutException:
                     continue
 
+            self.take_screenshot("/tmp/zepto_checkout_step2_cart.png")
+            logger.info(f"[Checkout] After cart click, cart_opened={cart_opened}, url={self.driver.current_url}")
+
             # Step 2: Click Checkout / Proceed to Checkout
             for selector in [
                 (By.XPATH, "//button[contains(text(),'Checkout')]"),
@@ -749,19 +755,26 @@ class ZeptoAutomation:
                         self.driver.execute_script("arguments[0].click();", btn)
                     time.sleep(3)
                     logger.info(f"[Checkout] Clicked checkout via {selector[1][:50]}")
+                    self.take_screenshot("/tmp/zepto_checkout_step3_payment.png")
+                    logger.info(f"[Checkout] On payment page, url={self.driver.current_url}")
                     return True
                 except TimeoutException:
                     continue
 
             logger.error(f"[Checkout] Could not find checkout button. cart_opened={cart_opened} url={self.driver.current_url}")
+            self.take_screenshot("/tmp/zepto_checkout_error.png")
             return False
         except Exception as e:
             logger.error(f"[Checkout] Failed: {e}")
+            self.take_screenshot("/tmp/zepto_checkout_exception.png")
             return False
 
     def get_payment_options(self) -> List[dict]:
         """Scrape available payment options from the checkout page."""
         try:
+            time.sleep(3)  # Wait for payment options to render
+            logger.info(f"[Payment] Getting options from {self.driver.current_url}")
+
             raw = self.driver.execute_script("""
                 var seen = {};
                 var result = [];
