@@ -253,22 +253,7 @@ async def _prompt_address_selection(chat_id: int, context: ContextTypes.DEFAULT_
         await context.bot.send_message(chat_id, msg, parse_mode="Markdown")
         return
 
-    # No address in header.
-    otp_was_done = context.bot_data.get("otp_was_done", True)
-
-    # If OTP was SKIPPED (session restored from profile) and no address → phantom session
-    if not otp_was_done and not context.bot_data.get("phantom_retry_done"):
-        context.bot_data["phantom_retry_done"] = True
-        context.bot_data["zepto_logged_in"] = False
-        context.bot_data["login_in_progress"] = True
-        await context.bot.send_message(
-            chat_id,
-            "⚠️ Session appears stale. Re-authenticating with OTP..."
-        )
-        await _trigger_zepto_login(chat_id, context, is_phantom_retry=True)
-        return
-
-    # Fresh OTP login but no address yet — show saved addresses from modal
+    # No address in header — try the saved addresses modal
     await context.bot.send_message(chat_id, "📍 Fetching your saved addresses from Zepto...")
     success, addresses = await loop.run_in_executor(None, zepto.get_saved_addresses)
 
@@ -286,7 +271,20 @@ async def _prompt_address_selection(chat_id: int, context: ContextTypes.DEFAULT_
         )
         return
 
-    # No saved addresses found either
+    # No saved addresses in modal either.
+    # If OTP was skipped (session from profile) this means phantom/stale session → force re-login.
+    otp_was_done = context.bot_data.get("otp_was_done", True)
+    if not otp_was_done and not context.bot_data.get("phantom_retry_done"):
+        context.bot_data["phantom_retry_done"] = True
+        context.bot_data["zepto_logged_in"] = False
+        context.bot_data["login_in_progress"] = True
+        await context.bot.send_message(
+            chat_id,
+            "⚠️ Session appears stale (no addresses found). Re-authenticating with OTP..."
+        )
+        await _trigger_zepto_login(chat_id, context, is_phantom_retry=True)
+        return
+
     await context.bot.send_message(
         chat_id,
         "⚠️ No delivery address found on Zepto.\n\n"
