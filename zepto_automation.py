@@ -75,50 +75,127 @@ class ZeptoAutomation:
         try:
             self.start()
             self.driver.get(ZEPTO_BASE_URL)
-            time.sleep(2)
+            time.sleep(3)
+            self.take_screenshot("/tmp/zepto_step1_home.png")
+            logger.info(f"Step1 — title: {self.driver.title}, url: {self.driver.current_url}")
 
-            # Click login/profile button
-            login_btn = self.wait.until(
-                EC.element_to_be_clickable((By.XPATH, "//button[contains(@class,'login') or contains(text(),'Login') or contains(text(),'Sign')]"))
-            )
-            login_btn.click()
-            time.sleep(1)
+            # Try multiple selectors to open login modal
+            login_opened = False
+            for selector in [
+                (By.XPATH, "//button[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'login')]"),
+                (By.XPATH, "//button[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'sign in')]"),
+                (By.XPATH, "//a[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'login')]"),
+                (By.XPATH, "//*[@data-testid='login-btn' or @data-testid='signin-btn' or @data-testid='profile-btn']"),
+                (By.XPATH, "//button[contains(@class,'login') or contains(@class,'signin') or contains(@class,'auth')]"),
+                (By.XPATH, "//*[contains(@aria-label,'login') or contains(@aria-label,'sign in')]"),
+            ]:
+                try:
+                    el = self.driver.find_element(*selector)
+                    el.click()
+                    time.sleep(2)
+                    login_opened = True
+                    logger.info(f"Opened login modal via selector: {selector}")
+                    break
+                except NoSuchElementException:
+                    continue
 
-            # Enter phone number
-            phone_input = self.wait.until(
-                EC.presence_of_element_located((By.XPATH, "//input[@type='tel' or @placeholder='Mobile number' or contains(@placeholder,'phone')]"))
-            )
-            phone_input.clear()
-            phone_input.send_keys(phone)
-            time.sleep(0.5)
+            self.take_screenshot("/tmp/zepto_step2_modal.png")
+            logger.info(f"Step2 — login_opened={login_opened}, url: {self.driver.current_url}")
 
-            # Submit phone
-            phone_input.send_keys(Keys.RETURN)
-            time.sleep(2)
+            # Find phone input
+            phone_input = None
+            for selector in [
+                (By.XPATH, "//input[@type='tel']"),
+                (By.XPATH, "//input[contains(@placeholder,'phone') or contains(@placeholder,'mobile') or contains(@placeholder,'number')]"),
+                (By.XPATH, "//input[contains(@placeholder,'Phone') or contains(@placeholder,'Mobile') or contains(@placeholder,'Number')]"),
+                (By.XPATH, "//input[@name='phone' or @name='mobile' or @name='phoneNumber']"),
+                (By.CSS_SELECTOR, "input[type='tel'], input[type='number'][maxlength='10']"),
+            ]:
+                try:
+                    phone_input = self.driver.find_element(*selector)
+                    break
+                except NoSuchElementException:
+                    continue
 
-            # Wait for OTP from user via callback
-            otp = otp_callback(phone)
-            if not otp:
-                logger.error("No OTP received")
+            if not phone_input:
+                self.take_screenshot("/tmp/zepto_step2_no_input.png")
+                logger.error("Could not find phone input field")
                 return False
 
-            # Enter OTP
-            otp_inputs = self.driver.find_elements(By.XPATH, "//input[@type='text' or @type='number' or @maxlength='1']")
-            if len(otp_inputs) >= 4:
-                for i, digit in enumerate(otp[:len(otp_inputs)]):
-                    otp_inputs[i].send_keys(digit)
+            # Strip country code if present — Zepto expects 10 digits
+            digits = phone.lstrip('+').replace(' ', '')
+            if digits.startswith('91') and len(digits) == 12:
+                digits = digits[2:]
+
+            phone_input.clear()
+            phone_input.send_keys(digits)
+            time.sleep(1)
+
+            # Submit phone
+            for selector in [
+                (By.XPATH, "//button[@type='submit']"),
+                (By.XPATH, "//button[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'continue')]"),
+                (By.XPATH, "//button[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'send otp')]"),
+                (By.XPATH, "//button[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'get otp')]"),
+            ]:
+                try:
+                    btn = self.driver.find_element(*selector)
+                    btn.click()
+                    break
+                except NoSuchElementException:
+                    continue
             else:
-                otp_field = otp_inputs[0] if otp_inputs else self.driver.find_element(By.XPATH, "//input[@type='text']")
-                otp_field.clear()
-                otp_field.send_keys(otp)
+                phone_input.send_keys(Keys.RETURN)
+
+            time.sleep(2)
+            self.take_screenshot("/tmp/zepto_step3_otp_screen.png")
+            logger.info(f"Step3 — OTP screen, url: {self.driver.current_url}")
+
+            # Wait for OTP from Telegram
+            otp = otp_callback(phone)
+            if not otp:
+                logger.error("No OTP received from user")
+                return False
+
+            otp = otp.strip()
+            logger.info(f"Got OTP: {otp}")
+
+            # Try individual digit inputs first (most common on Zepto)
+            otp_inputs = self.driver.find_elements(By.XPATH, "//input[@maxlength='1']")
+            if len(otp_inputs) >= len(otp):
+                for i, digit in enumerate(otp):
+                    otp_inputs[i].click()
+                    otp_inputs[i].send_keys(digit)
+                    time.sleep(0.2)
+            else:
+                # Single OTP input field
+                for selector in [
+                    (By.XPATH, "//input[@type='number' or @type='tel' or @type='text'][@maxlength]"),
+                    (By.XPATH, "//input[contains(@placeholder,'OTP') or contains(@placeholder,'otp') or contains(@placeholder,'code')]"),
+                    (By.CSS_SELECTOR, "input[autocomplete='one-time-code']"),
+                ]:
+                    try:
+                        otp_field = self.driver.find_element(*selector)
+                        otp_field.clear()
+                        otp_field.send_keys(otp)
+                        break
+                    except NoSuchElementException:
+                        continue
+                else:
+                    logger.error("Could not find OTP input field")
+                    return False
 
             time.sleep(3)
+            self.take_screenshot("/tmp/zepto_step4_after_otp.png")
+            logger.info(f"Step4 — after OTP, url: {self.driver.current_url}")
+
             self.is_logged_in = True
             logger.info("Logged in to Zepto successfully")
             return True
 
         except Exception as e:
             logger.error(f"Login failed: {e}")
+            self.take_screenshot("/tmp/zepto_login_error.png")
             return False
 
     def set_delivery_location(self, pin_code: str) -> bool:

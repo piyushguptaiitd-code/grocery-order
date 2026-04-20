@@ -156,6 +156,18 @@ async def _trigger_zepto_login(chat_id: int, context: ContextTypes.DEFAULT_TYPE)
         zepto.start()
         success = await loop.run_in_executor(None, lambda: zepto.login(ZEPTO_PHONE, otp_callback))
         context.bot_data["awaiting_otp"] = False
+
+        # Send debug screenshots so we can see what happened in the browser
+        import os
+        for label, path in [("Home", "/tmp/zepto_step1_home.png"), ("Modal", "/tmp/zepto_step2_modal.png"),
+                             ("OTP screen", "/tmp/zepto_step3_otp_screen.png"), ("After OTP", "/tmp/zepto_step4_after_otp.png"),
+                             ("Error", "/tmp/zepto_login_error.png")]:
+            if os.path.exists(path):
+                try:
+                    await context.bot.send_photo(chat_id, photo=open(path, "rb"), caption=f"🖥 {label}")
+                except Exception:
+                    pass
+
         if success:
             context.bot_data["zepto_logged_in"] = True
             await context.bot.send_message(chat_id, "✅ Logged in to Zepto!")
