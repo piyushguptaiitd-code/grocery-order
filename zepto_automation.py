@@ -93,16 +93,18 @@ class ZeptoAutomation:
         """Check if already logged in by looking for logged-in indicators on page."""
         try:
             self.driver.get(ZEPTO_BASE_URL)
-            time.sleep(2)
+            time.sleep(3)  # Give page time to load cookies
             # Check if we see logged-in elements (not login button)
             login_btn = self.driver.find_elements(By.XPATH, "//button[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'login')]")
             if login_btn:
-                logger.info("[Login] Login button still visible, session expired")
+                logger.info("[Login] Login button visible — session expired or cookies invalid")
                 return False
             # Check for user profile or account elements
             profile = self.driver.find_elements(By.XPATH, "//*[@data-testid='profile'] | //*[contains(@class,'profile')] | //*[contains(text(),'Account')]")
-            is_logged = len(profile) > 0
-            logger.info(f"[Login] Session check: logged_in={is_logged}")
+            # Also check for cart icon (if visible, user is logged in)
+            cart = self.driver.find_elements(By.XPATH, "//*[@data-testid='cart'] | //*[contains(@class,'cart')]")
+            is_logged = len(profile) > 0 or len(cart) > 0
+            logger.info(f"[Login] Session valid: {is_logged} (profile:{len(profile)}, cart:{len(cart)})")
             return is_logged
         except Exception as e:
             logger.warning(f"[Login] Could not check session: {e}")
@@ -501,13 +503,20 @@ class ZeptoAutomation:
     def _dismiss_popups(self):
         """Dismiss any overlays or popups that might block interaction."""
         for selector in [
-            "//button[contains(text(),'Allow') or contains(text(),'OK') or contains(text(),'Got it') or contains(text(),'Close') or contains(text(),'×')]",
+            "//button[contains(text(),'Allow') or contains(text(),'OK') or contains(text(),'Got it') or contains(text(),'Close') or contains(text(),'×') or contains(text(),'Cancel')]",
             "//div[@role='dialog']//button",
+            "//div[contains(@class,'modal')]//button[1]",
+            "//div[contains(@class,'overlay')]//button",
         ]:
             try:
-                btn = self.driver.find_element(By.XPATH, selector)
-                btn.click()
-                time.sleep(0.5)
+                buttons = self.driver.find_elements(By.XPATH, selector)
+                for btn in buttons[:3]:  # Try first 3 matches
+                    try:
+                        if btn.is_displayed():
+                            btn.click()
+                            time.sleep(0.3)
+                    except Exception:
+                        pass
             except NoSuchElementException:
                 pass
 
@@ -548,7 +557,20 @@ class ZeptoAutomation:
                 return unique.slice(0, 5).map(function(el) {
                     var text = el.innerText || '';
                     var lines = text.split('\\n').map(function(l) { return l.trim(); }).filter(Boolean);
-                    var name = lines[0] || '';
+                    // Find product name: skip short lines, quantity lines, price lines, button labels
+                    var name = '';
+                    for (var i = 0; i < lines.length; i++) {
+                        var l = lines[i];
+                        var isQty = /^\\d+\\s*(g|kg|ml|L|pc|pack|pcs)/i.test(l);
+                        var isPrice = /^₹/.test(l);
+                        var isShort = l.length < 4;
+                        var isBtn = /^(Add|Buy|Remove|\\+|-)$/.test(l);
+                        if (!isQty && !isPrice && !isShort && !isBtn && l.length > 5) {
+                            name = l;
+                            break;
+                        }
+                    }
+                    if (!name) name = lines.find(function(l) { return l.length > 5 && !/^₹/.test(l); }) || lines[0] || '';
                     var priceMatch = text.match(/₹\\s?([\\d,]+)/);
                     var price = priceMatch ? parseFloat(priceMatch[1].replace(',','')) : 0;
                     var qtyLine = lines.find(function(l) { return /\\d+\\s*(g|kg|ml|L|pc|pack)/i.test(l); }) || '';
@@ -561,8 +583,11 @@ class ZeptoAutomation:
 
             products = []
             for i, p in enumerate(raw or []):
-                if p.get('name') and p.get('price', 0) > 0:
-                    products.append(ZeptoProduct(
+                # Skip products with missing name or price
+                if not p.get('name') or p.get('price', 0) <= 0:
+                    logger.warning(f"[Search] Skipping product {i}: missing name={not p.get('name')}, price={p.get('price', 0)}")
+                    continue
+                products.append(ZeptoProduct(
                         product_id=f"zepto_{i}_{query[:10].replace(' ', '_')}",
                         name=p['name'],
                         price=p['price'],
@@ -633,12 +658,35 @@ class ZeptoAutomation:
     def go_to_checkout(self) -> bool:
         """Click the checkout button to navigate to the checkout/payment page."""
         try:
-            checkout_btn = self.wait.until(
-                EC.element_to_be_clickable((By.XPATH,
-                    "//button[contains(text(),'Checkout') or contains(text(),'Proceed') or contains(@class,'checkout')]"
-                ))
-            )
-            checkout_btn.click()
+            # Dismiss any popups/modals that might block the button
+            self._dismiss_popups()
+            time.sleep(1)
+
+            # Try multiple selector strategies
+            checkout_btn = None
+            for selector in [
+                (By.XPATH, "//button[contains(text(),'Checkout')]"),
+                (By.XPATH, "//button[contains(text(),'Proceed')]"),
+                (By.XPATH, "//button[contains(@class,'checkout')]"),
+                (By.XPATH, "//*[contains(text(),'Checkout')]"),
+            ]:
+                try:
+                    checkout_btn = self.wait.until(EC.element_to_be_clickable(selector), timeout=5)
+                    logger.info(f"[Checkout] Found button via {selector[1][:50]}")
+                    break
+                except TimeoutException:
+                    continue
+
+            if not checkout_btn:
+                logger.error("[Checkout] Could not find checkout button")
+                return False
+
+            try:
+                checkout_btn.click()
+            except Exception:
+                # Fallback to JS click if regular click fails
+                self.driver.execute_script("arguments[0].click();", checkout_btn)
+
             time.sleep(3)
             logger.info("[Checkout] Navigated to checkout page")
             return True

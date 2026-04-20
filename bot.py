@@ -134,19 +134,31 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     addr = context.bot_data["selected_address"]
-    await update.message.reply_text(
-        "👋 *Grocery Group Bot* is ready!\n\n"
-        f"📍 Delivering to: *{addr['label']}* — {addr['pin_code']}\n\n"
-        "Just type items to add them to the cart:\n"
-        "  • `add milk`\n"
-        "  • `add bread, eggs, butter`\n\n"
-        "*Commands:*\n"
-        "/view_cart — see current cart\n"
-        "/save_address — save a delivery address\n"
-        "/cancel — clear cart and start over\n"
-        "/history — view past orders",
-        parse_mode="Markdown",
-    )
+    cart: CartManager = context.bot_data.get("cart")
+
+    # Show cart if it has items from previous session
+    if cart and not cart.is_empty():
+        await update.message.reply_text(
+            f"👋 *Welcome back!*\n\n"
+            f"📍 Delivering to: *{addr['label']}*\n\n"
+            f"{cart.format_cart()}\n\n"
+            "Continue adding items or type `/checkout` to place the order.",
+            parse_mode="Markdown",
+        )
+    else:
+        await update.message.reply_text(
+            "👋 *Grocery Group Bot* is ready!\n\n"
+            f"📍 Delivering to: *{addr['label']}* — {addr['pin_code']}\n\n"
+            "Just type items to add them to the cart:\n"
+            "  • `add milk`\n"
+            "  • `add bread, eggs, butter`\n\n"
+            "*Commands:*\n"
+            "/view_cart — see current cart\n"
+            "/save_address — save a delivery address\n"
+            "/cancel — clear cart and start over\n"
+            "/history — view past orders",
+            parse_mode="Markdown",
+        )
 
 
 async def _trigger_zepto_login(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
