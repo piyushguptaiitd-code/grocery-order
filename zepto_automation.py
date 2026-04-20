@@ -639,6 +639,9 @@ class ZeptoAutomation:
     def add_to_cart(self, product_index: int, query: str) -> bool:
         """Add a product from the current search page to Zepto's cart by index."""
         try:
+            logger.info(f"[Cart] Adding product {product_index} to cart on page: {self.driver.current_url}")
+            self.take_screenshot(f"/tmp/zepto_add_to_cart_before_{product_index}.png")
+
             result = self.driver.execute_script("""
                 var idx = arguments[0];
                 var candidates = Array.from(document.querySelectorAll('div, article, section, li'));
@@ -659,19 +662,26 @@ class ZeptoAutomation:
                     var key = Math.round(rect.top / 10) + '_' + Math.round(rect.left / 10);
                     if (!seen[key]) { seen[key] = true; unique.push(el); }
                 });
-                if (idx >= unique.length) return false;
+                if (idx >= unique.length) return { success: false, reason: 'index out of bounds', count: unique.length };
                 var card = unique[idx];
                 var buttons = Array.from(card.querySelectorAll('button'));
                 var addBtn = buttons.find(function(b) {
                     var t = (b.innerText || '').trim().toLowerCase();
                     return t === 'add' || t === '+';
                 }) || buttons[buttons.length - 1];
-                if (addBtn) { addBtn.click(); return true; }
-                return false;
+                if (!addBtn) return { success: false, reason: 'no button found' };
+                try {
+                    addBtn.click();
+                    return { success: true, reason: 'clicked' };
+                } catch (e) {
+                    return { success: false, reason: 'click failed: ' + e.message };
+                }
             """, product_index)
+
             time.sleep(2)
-            logger.info(f"[Cart] add_to_cart index={product_index} result={result}")
-            return bool(result)
+            logger.info(f"[Cart] add_to_cart result: {result}")
+            self.take_screenshot(f"/tmp/zepto_add_to_cart_after_{product_index}.png")
+            return bool(result.get('success'))
         except Exception as e:
             logger.error(f"[Cart] add_to_cart failed: {e}")
             return False
