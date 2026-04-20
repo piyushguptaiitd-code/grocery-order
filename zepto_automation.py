@@ -1,3 +1,4 @@
+import json
 import time
 import logging
 from dataclasses import dataclass
@@ -12,9 +13,11 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
-from config import SELENIUM_HEADLESS, SELENIUM_TIMEOUT, ZEPTO_SEARCH_LIMIT
+from config import SELENIUM_HEADLESS, SELENIUM_TIMEOUT, ZEPTO_SEARCH_LIMIT, DATABASE_PATH
 
 logger = logging.getLogger(__name__)
+
+COOKIES_FILE = DATABASE_PATH.replace('.db', '_zepto_cookies.json')
 
 ZEPTO_BASE_URL = "https://www.zeptonow.com"
 
@@ -57,11 +60,66 @@ class ZeptoAutomation:
         driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         return driver
 
+    def _save_cookies(self):
+        """Save browser cookies to file for persistent login."""
+        try:
+            cookies = self.driver.get_cookies()
+            with open(COOKIES_FILE, 'w') as f:
+                json.dump(cookies, f)
+            logger.info(f"[Cookies] Saved {len(cookies)} cookies")
+        except Exception as e:
+            logger.warning(f"[Cookies] Failed to save: {e}")
+
+    def _load_cookies(self):
+        """Load saved cookies to browser for automatic login."""
+        try:
+            with open(COOKIES_FILE, 'r') as f:
+                cookies = json.load(f)
+            self.driver.get(ZEPTO_BASE_URL)
+            time.sleep(1)
+            for cookie in cookies:
+                try:
+                    self.driver.add_cookie(cookie)
+                except Exception as e:
+                    logger.warning(f"[Cookies] Could not add cookie {cookie.get('name')}: {e}")
+            logger.info(f"[Cookies] Loaded {len(cookies)} cookies")
+            time.sleep(2)
+        except FileNotFoundError:
+            logger.info("[Cookies] No saved cookies found")
+        except Exception as e:
+            logger.error(f"[Cookies] Failed to load: {e}")
+
+    def _check_session_valid(self) -> bool:
+        """Check if already logged in by looking for logged-in indicators on page."""
+        try:
+            self.driver.get(ZEPTO_BASE_URL)
+            time.sleep(2)
+            # Check if we see logged-in elements (not login button)
+            login_btn = self.driver.find_elements(By.XPATH, "//button[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'login')]")
+            if login_btn:
+                logger.info("[Login] Login button still visible, session expired")
+                return False
+            # Check for user profile or account elements
+            profile = self.driver.find_elements(By.XPATH, "//*[@data-testid='profile'] | //*[contains(@class,'profile')] | //*[contains(text(),'Account')]")
+            is_logged = len(profile) > 0
+            logger.info(f"[Login] Session check: logged_in={is_logged}")
+            return is_logged
+        except Exception as e:
+            logger.warning(f"[Login] Could not check session: {e}")
+            return False
+
     def start(self):
         if not self.driver:
             self.driver = self._build_driver()
             self.wait = WebDriverWait(self.driver, SELENIUM_TIMEOUT)
             logger.info("Selenium driver started")
+            # Try to restore saved session
+            self._load_cookies()
+            if self._check_session_valid():
+                self.is_logged_in = True
+                logger.info("[Login] Restored session from saved cookies")
+            else:
+                logger.info("[Login] Cookies expired or invalid, will need to re-login")
 
     def stop(self):
         if self.driver:
@@ -77,6 +135,10 @@ class ZeptoAutomation:
         """
         try:
             self.start()
+            # If cookies restored a valid session, skip OTP entirely
+            if self.is_logged_in:
+                logger.info("[Login P1] Already logged in via saved cookies — skipping OTP")
+                return True, "✅ Already logged in (session restored from cookies)!"
             self.driver.get(ZEPTO_BASE_URL)
             time.sleep(3)
             self.take_screenshot("/tmp/zepto_step1_home.png")
@@ -232,6 +294,7 @@ class ZeptoAutomation:
             logger.info(f"[Login P2] After OTP url={self.driver.current_url}")
 
             self.is_logged_in = True
+            self._save_cookies()
             return True, "✅ Logged in to Zepto!"
 
         except Exception as e:

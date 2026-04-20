@@ -164,6 +164,14 @@ async def _trigger_zepto_login(chat_id: int, context: ContextTypes.DEFAULT_TYPE)
             await context.bot.send_message(chat_id, msg + "\nSend /start to try again.")
             return
 
+        # Already logged in via saved cookies — skip OTP entirely
+        if msg.startswith("✅ Already logged in"):
+            context.bot_data["zepto_logged_in"] = True
+            context.bot_data["login_in_progress"] = False
+            await context.bot.send_message(chat_id, msg)
+            await _prompt_address_selection(chat_id, context)
+            return
+
         await context.bot.send_message(chat_id, msg)  # "📩 OTP sent... please reply"
 
         # Phase 2: wait for OTP reply in Telegram
@@ -407,12 +415,13 @@ async def process_next_item(update_or_query, context: ContextTypes.DEFAULT_TYPE)
 
     await context.bot.send_message(chat_id, f"🔍 Searching Zepto for *{item}*...", parse_mode="Markdown")
 
-    zepto.start()
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, zepto.start)
     if ZEPTO_PIN and not zepto._location_set:
         await context.bot.send_message(chat_id, "📍 Setting delivery location...")
-        await asyncio.get_event_loop().run_in_executor(None, lambda: zepto.set_delivery_location(ZEPTO_PIN))
+        await loop.run_in_executor(None, lambda: zepto.set_delivery_location(ZEPTO_PIN))
         zepto._location_set = True
-    products = zepto.search_products(item)
+    products = await loop.run_in_executor(None, lambda: zepto.search_products(item))
 
     if not products:
         await context.bot.send_message(chat_id, f"❌ No results found for '{item}'. Skipping.")
@@ -462,7 +471,8 @@ async def process_next_item_by_chat(chat_id: int, context: ContextTypes.DEFAULT_
 
     await context.bot.send_message(chat_id, f"🔍 Searching Zepto for *{item}*...", parse_mode="Markdown")
 
-    products = zepto.search_products(item)
+    loop = asyncio.get_event_loop()
+    products = await loop.run_in_executor(None, lambda: zepto.search_products(item))
     context.bot_data["search_results"] = products
 
     if not products:
@@ -516,15 +526,23 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         item_name = context.bot_data.get("current_search_item", "item")
         cart: CartManager = context.bot_data.get("cart")
 
+        async def _edit(text, **kwargs):
+            try:
+                if query.message.photo:
+                    await query.edit_message_caption(caption=text, **kwargs)
+                else:
+                    await query.edit_message_text(text=text, **kwargs)
+            except Exception as e:
+                logger.warning(f"[Callback] edit failed: {e}")
+
         if data == "pick_skip":
-            await query.edit_message_caption(f"⏭ Skipped *{item_name}*", parse_mode="Markdown")
+            await _edit(f"⏭ Skipped *{item_name}*", parse_mode="Markdown")
         else:
             idx = int(data.split("_")[1])
             if idx < len(products):
                 p = products[idx]
                 if not p.in_stock:
-                    # Offer alternatives (same list, already shown) or skip
-                    await query.edit_message_caption(
+                    await _edit(
                         f"❌ *{p.name}* is out of stock. Please pick another or skip.",
                         reply_markup=query.message.reply_markup,
                         parse_mode="Markdown",
@@ -532,7 +550,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     return
                 zepto.add_to_cart(idx, item_name)
                 cart.add_item(p.product_id, p.name, p.price, user_db_id)
-                await query.edit_message_caption(
+                await _edit(
                     f"✅ Added *{p.name}* (₹{p.price:.0f}) to cart by {user.first_name}",
                     parse_mode="Markdown",
                 )
