@@ -259,10 +259,10 @@ HELP_TEXT = (
     "  `view cart` / `cart` — see current cart\n"
     "  `cancel` / `clear cart` — clear and start over\n\n"
     "*Account:*\n"
-    "  `/start` — connect Zepto / select address\n"
+    "  `start` / `login` / `connect` — connect Zepto / select address\n"
     "  `history` / `past orders` — view past orders\n"
     "  `help` — show this message\n\n"
-    "_All commands work as plain text too — no slash needed._"
+    "_Everything works as plain text — no slash needed!_"
 )
 
 
@@ -403,6 +403,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Inline text command routing
     tl = text.lower().strip()
+    if tl in ("start", "begin", "login", "connect"):
+        await start(update, context)
+        return
     if any(tl == k or tl.startswith(k) for k in ["place order", "checkout", "confirm order", "place order now"]):
         await checkout(update, context)
         return
