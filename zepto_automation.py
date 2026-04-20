@@ -90,30 +90,24 @@ class ZeptoAutomation:
             logger.error(f"[Cookies] Failed to load: {e}")
 
     def _check_session_valid(self) -> bool:
-        """Check if already logged in using JavaScript to inspect auth state."""
+        """Check if logged in by looking for a Login button — if present, not logged in."""
         try:
             self.driver.get(ZEPTO_BASE_URL)
-            time.sleep(4)
-            # Use JS to check for auth tokens in localStorage/cookies — more reliable than DOM checks
+            time.sleep(3)
             result = self.driver.execute_script("""
-                var cookies = document.cookie || '';
-                var ls = '';
-                try { ls = JSON.stringify(localStorage); } catch(e) {}
-                var hasAuth = cookies.includes('access_token') ||
-                              cookies.includes('refreshToken') ||
-                              cookies.includes('user_id') ||
-                              cookies.includes('authToken') ||
-                              ls.includes('user') ||
-                              ls.includes('token') ||
-                              ls.includes('auth');
-                // Also check if login modal is NOT present
-                var loginModal = document.querySelector('input[type="tel"]');
-                return { hasAuth: hasAuth, hasLoginModal: !!loginModal,
-                         cookieSnip: cookies.substring(0, 200), url: window.location.href };
+                var allText = document.body.innerText || '';
+                var loginBtn = Array.from(document.querySelectorAll('button, a')).find(function(el) {
+                    var t = (el.innerText || el.textContent || '').trim().toLowerCase();
+                    return t === 'login' || t === 'sign in' || t === 'log in';
+                });
+                return {
+                    hasLoginBtn: !!loginBtn,
+                    loginBtnText: loginBtn ? loginBtn.innerText : null,
+                    url: window.location.href
+                };
             """)
             logger.info(f"[Login] Session check: {result}")
-            # Logged in if we have auth indicators AND no login modal
-            is_logged = result.get('hasAuth', False) and not result.get('hasLoginModal', True)
+            is_logged = not result.get('hasLoginBtn', True)
             logger.info(f"[Login] Session valid: {is_logged}")
             return is_logged
         except Exception as e:
