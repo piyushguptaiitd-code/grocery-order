@@ -56,6 +56,9 @@ class ZeptoAutomation:
         options.add_experimental_option("useAutomationExtension", False)
         options.add_argument("--window-size=1280,800")
         options.add_argument("user-agent=Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36")
+        # Persistent profile so login survives bot restarts
+        profile_dir = DATABASE_PATH.replace('.db', '_chrome_profile')
+        options.add_argument(f"--user-data-dir={profile_dir}")
         driver = webdriver.Chrome(options=options)
         driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         return driver
@@ -119,8 +122,6 @@ class ZeptoAutomation:
             self.driver = self._build_driver()
             self.wait = WebDriverWait(self.driver, SELENIUM_TIMEOUT)
             logger.info("Selenium driver started")
-            # Try to restore saved session
-            self._load_cookies()
             if self._check_session_valid():
                 self.is_logged_in = True
                 logger.info("[Login] Restored session from saved cookies")
@@ -300,7 +301,6 @@ class ZeptoAutomation:
             logger.info(f"[Login P2] After OTP url={self.driver.current_url}")
 
             self.is_logged_in = True
-            self._save_cookies()
             return True, "✅ Logged in to Zepto!"
 
         except Exception as e:
