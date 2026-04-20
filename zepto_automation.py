@@ -759,69 +759,56 @@ class ZeptoAutomation:
         return added
 
     def go_to_checkout(self) -> bool:
-        """Navigate to cart and click Proceed to Checkout."""
+        """Click cart icon (top-right) on current page, then proceed to checkout."""
         try:
-            # Go to home page first — cart summary bar is visible there
-            self.driver.get(ZEPTO_BASE_URL)
-            time.sleep(3)
-            self._dismiss_popups()
-            time.sleep(1)
+            self.take_screenshot("/tmp/zepto_checkout_step1_before.png")
+            logger.info(f"[Checkout] Current page: {self.driver.current_url}")
 
-            logger.info(f"[Checkout] Home page url={self.driver.current_url}")
-            self.take_screenshot("/tmp/zepto_checkout_step1_home.png")
-
-            # Step 1: Click the cart summary bar / cart icon to open cart
-            cart_opened = False
+            # Click the cart icon in the top-right header
+            cart_clicked = False
             for selector in [
-                (By.XPATH, "//*[contains(@aria-label,'cart') or contains(@data-testid,'cart')]"),
-                (By.XPATH, "//button[contains(@class,'cart')]"),
-                # Zepto shows a bottom bar with item count + "Proceed" when cart has items
-                (By.XPATH, "//*[contains(text(),'Proceed')]"),
-                (By.XPATH, "//*[contains(text(),'View Cart') or contains(text(),'View cart')]"),
+                (By.XPATH, "//*[@data-testid='cart-icon']"),
+                (By.XPATH, "//*[@data-testid='cart']"),
+                (By.XPATH, "//a[contains(@href,'cart')]"),
+                (By.XPATH, "//*[contains(@aria-label,'cart') or contains(@aria-label,'Cart')]"),
+                (By.XPATH, "//header//*[contains(@class,'cart')]"),
+                (By.XPATH, "//*[name()='svg' and ancestor::a[contains(@href,'cart')]]"),
             ]:
                 try:
-                    el = WebDriverWait(self.driver, 5).until(EC.element_to_be_clickable(selector))
-                    try:
-                        el.click()
-                    except Exception:
-                        self.driver.execute_script("arguments[0].click();", el)
+                    el = WebDriverWait(self.driver, 4).until(EC.element_to_be_clickable(selector))
+                    self.driver.execute_script("arguments[0].click();", el)
                     time.sleep(2)
-                    cart_opened = True
-                    logger.info(f"[Checkout] Opened cart via {selector[1][:50]}")
+                    cart_clicked = True
+                    logger.info(f"[Checkout] Clicked cart icon via {selector[1][:60]}")
                     break
                 except TimeoutException:
                     continue
 
-            self.take_screenshot("/tmp/zepto_checkout_step2_cart.png")
-            logger.info(f"[Checkout] After cart click, cart_opened={cart_opened}, url={self.driver.current_url}")
+            self.take_screenshot("/tmp/zepto_checkout_step2_after_cart_click.png")
+            logger.info(f"[Checkout] cart_clicked={cart_clicked}, url={self.driver.current_url}")
 
-            # Step 2: Click Checkout / Proceed to Checkout
+            # Now look for Proceed to Checkout button
             for selector in [
-                (By.XPATH, "//button[contains(text(),'Checkout')]"),
-                (By.XPATH, "//button[contains(text(),'Proceed to Checkout')]"),
                 (By.XPATH, "//button[contains(text(),'Proceed')]"),
-                (By.XPATH, "//*[contains(text(),'Checkout')]"),
+                (By.XPATH, "//button[contains(text(),'Checkout')]"),
+                (By.XPATH, "//button[contains(text(),'Place Order')]"),
+                (By.XPATH, "//*[contains(text(),'Proceed to Checkout')]"),
             ]:
                 try:
-                    btn = WebDriverWait(self.driver, 8).until(EC.element_to_be_clickable(selector))
-                    try:
-                        btn.click()
-                    except Exception:
-                        self.driver.execute_script("arguments[0].click();", btn)
+                    btn = WebDriverWait(self.driver, 6).until(EC.element_to_be_clickable(selector))
+                    self.driver.execute_script("arguments[0].click();", btn)
                     time.sleep(3)
-                    logger.info(f"[Checkout] Clicked checkout via {selector[1][:50]}")
+                    logger.info(f"[Checkout] Clicked proceed via {selector[1][:50]}, now at {self.driver.current_url}")
                     self.take_screenshot("/tmp/zepto_checkout_step3_payment.png")
-                    logger.info(f"[Checkout] On payment page, url={self.driver.current_url}")
                     return True
                 except TimeoutException:
                     continue
 
-            logger.error(f"[Checkout] Could not find checkout button. cart_opened={cart_opened} url={self.driver.current_url}")
+            logger.error(f"[Checkout] Could not find Proceed button. cart_clicked={cart_clicked}")
             self.take_screenshot("/tmp/zepto_checkout_error.png")
             return False
         except Exception as e:
             logger.error(f"[Checkout] Failed: {e}")
-            self.take_screenshot("/tmp/zepto_checkout_exception.png")
             return False
 
     def get_payment_options(self) -> List[dict]:
