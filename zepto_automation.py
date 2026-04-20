@@ -363,7 +363,7 @@ class ZeptoAutomation:
         logger.warning("[Location] Could not open modal via buttons")
         return False
 
-    def get_current_address(self) -> dict | None:
+    def get_current_address(self) -> Optional[dict]:
         """Read the currently selected delivery address from Zepto's header."""
         try:
             result = self.driver.execute_script("""
