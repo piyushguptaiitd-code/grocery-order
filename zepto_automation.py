@@ -747,18 +747,23 @@ class ZeptoAutomation:
                     var text = (el.innerText || '').trim();
                     var lines = text.split('\\n').map(function(l){ return l.trim(); }).filter(Boolean);
                     var hasPrice = text.includes('₹');
-                    var hasQty = lines.some(function(l){ return /^\\d+$/.test(l) || /x\\d+/i.test(l); });
                     var rect = el.getBoundingClientRect();
-                    var isVisible = rect.width > 50 && rect.height > 20 && rect.height < 200;
+                    var isVisible = rect.width > 80 && rect.height > 40 && rect.height < 250;
                     var childCount = el.children.length;
-                    if (hasPrice && isVisible && childCount >= 2 && childCount <= 15 && lines.length >= 2) {
+                    // Find a proper product name line: not a price, not a qty/weight, not a button label, not a discount tag
+                    var name = lines.find(function(l){
+                        return l.length > 5
+                            && !/^₹/.test(l)
+                            && !/^\\d+$/.test(l)
+                            && !/^(Add|Remove|\\+|-)$/.test(l)
+                            && !/^\\d+\\s*(g|kg|ml|L|pc|pcs|pack)/i.test(l)
+                            && !/OFF$/i.test(l);
+                    });
+                    if (hasPrice && isVisible && childCount >= 2 && childCount <= 20 && name) {
                         var priceMatch = text.match(/₹\\s?([\\d,]+)/);
                         var price = priceMatch ? priceMatch[1] : '';
-                        var name = lines.find(function(l){
-                            return l.length > 5 && !/^₹/.test(l) && !/^\\d+$/.test(l) && !/^(Add|Remove|\\+|-)$/.test(l);
-                        }) || lines[0];
                         var key = name + price;
-                        if (!seen[key] && name && price) {
+                        if (!seen[key] && price) {
                             seen[key] = true;
                             results.push({ name: name, price: price });
                         }
