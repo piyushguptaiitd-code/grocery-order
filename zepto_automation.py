@@ -253,6 +253,112 @@ class ZeptoAutomation:
         logger.info(msg)
         return success
 
+    def get_saved_addresses(self) -> tuple:
+        """
+        Navigate to Zepto's location selector and scrape saved addresses.
+        Returns (success: bool, addresses: list of dicts with keys: index, label, area, pin_code)
+        """
+        try:
+            self.driver.get(ZEPTO_BASE_URL)
+            time.sleep(3)
+
+            # Click the location/delivery area button to open the picker
+            location_opened = False
+            for selector in [
+                (By.XPATH, "//*[@data-testid='location-btn' or @data-testid='address-btn']"),
+                (By.XPATH, "//button[contains(@aria-label,'location') or contains(@aria-label,'address') or contains(@aria-label,'deliver')]"),
+                (By.XPATH, "//*[contains(text(),'Deliver to') or contains(text(),'Delivering to')]"),
+                (By.XPATH, "//button[contains(@class,'location') or contains(@class,'address') or contains(@class,'deliver')]"),
+            ]:
+                try:
+                    self.driver.find_element(*selector).click()
+                    time.sleep(2)
+                    location_opened = True
+                    logger.info(f"[Addresses] Opened location picker via {selector[1][:60]}")
+                    break
+                except NoSuchElementException:
+                    continue
+
+            self.take_screenshot("/tmp/zepto_addresses.png")
+            logger.info(f"[Addresses] location_opened={location_opened} url={self.driver.current_url}")
+
+            # Scrape saved addresses using JavaScript
+            raw = self.driver.execute_script("""
+                var candidates = Array.from(document.querySelectorAll('div, li, article'));
+                var addressCards = candidates.filter(function(el) {
+                    var text = el.innerText || '';
+                    var rect = el.getBoundingClientRect();
+                    var isVisible = rect.width > 50 && rect.height > 20;
+                    var hasAddress = text.length > 10 && (
+                        /\\d{3,6}/.test(text) ||
+                        /road|street|lane|nagar|colony|sector|flat|floor|building|apt|block|wing|society/i.test(text)
+                    );
+                    var notTooLarge = rect.width < 600 && rect.height < 200;
+                    return isVisible && hasAddress && notTooLarge;
+                });
+                // Deduplicate
+                var seen = {};
+                var unique = [];
+                candidates.forEach(function(el) {
+                    var text = (el.innerText || '').trim();
+                    if (text && !seen[text] && text.length > 5 && text.length < 200) {
+                        seen[text] = true;
+                        unique.push(text);
+                    }
+                });
+                return unique.slice(0, 8);
+            """)
+
+            if not raw:
+                logger.warning("[Addresses] No addresses found via JS, trying XPath")
+                # Fallback: look for any list items in a panel/modal
+                items = self.driver.find_elements(By.XPATH,
+                    "//div[@role='dialog']//li | //div[contains(@class,'address')]//div[contains(@class,'item')] | //div[contains(@class,'location')]//li"
+                )
+                raw = [el.text.strip() for el in items if el.text.strip() and len(el.text.strip()) > 5]
+
+            addresses = []
+            for i, text in enumerate(raw or []):
+                lines = [l.strip() for l in text.split('\n') if l.strip()]
+                label = lines[0] if lines else f"Address {i+1}"
+                area = lines[1] if len(lines) > 1 else ""
+                addresses.append({"index": i, "label": label, "area": area, "full_text": text})
+
+            logger.info(f"[Addresses] Found {len(addresses)} saved addresses")
+            return True, addresses
+
+        except Exception as e:
+            logger.error(f"[Addresses] Failed: {e}")
+            return False, []
+
+    def select_zepto_address(self, address_index: int) -> bool:
+        """Click the address at address_index in the location picker."""
+        try:
+            # Re-open if needed
+            raw = self.driver.execute_script("""
+                var candidates = Array.from(document.querySelectorAll('div, li, article'));
+                return candidates.filter(function(el) {
+                    var text = el.innerText || '';
+                    var rect = el.getBoundingClientRect();
+                    var isVisible = rect.width > 50 && rect.height > 20;
+                    var hasAddress = text.length > 10 && (
+                        /\\d{3,6}/.test(text) ||
+                        /road|street|lane|nagar|colony|sector|flat|floor|building|apt|block|wing|society/i.test(text)
+                    );
+                    return isVisible && hasAddress && rect.width < 600 && rect.height < 200;
+                });
+            """)
+
+            if raw and address_index < len(raw):
+                self.driver.execute_script("arguments[0].click();", raw[address_index])
+                time.sleep(2)
+                logger.info(f"[Addresses] Selected address index {address_index}")
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"[Addresses] select failed: {e}")
+            return False
+
     def set_delivery_location(self, pin_code: str) -> bool:
         """Set delivery location by pin code."""
         try:

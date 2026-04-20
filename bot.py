@@ -199,19 +199,30 @@ async def _trigger_zepto_login(chat_id: int, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def _prompt_address_selection(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    """Show saved addresses for one-time selection at session start."""
-    addresses = address_mgr.get_all()
-    if not addresses:
+    """Fetch saved addresses from Zepto and show for selection."""
+    await context.bot.send_message(chat_id, "📍 Fetching your saved addresses from Zepto...")
+
+    loop = asyncio.get_event_loop()
+    success, addresses = await loop.run_in_executor(None, zepto.get_saved_addresses)
+
+    if not success or not addresses:
         await context.bot.send_message(
             chat_id,
-            "No saved addresses yet. Use /save_address to add one, then /start again."
+            "❌ Could not fetch addresses from Zepto.\n\nUse /save_address to add one manually, then /start again."
         )
         return
 
-    keyboard = [[InlineKeyboardButton(f"📍 {a['label']} — {a['pin_code']}", callback_data=f"setup_addr_{a['address_id']}")] for a in addresses]
+    context.bot_data["zepto_addresses"] = addresses
+
+    keyboard = []
+    for a in addresses:
+        label = a["label"]
+        area = f" — {a['area']}" if a["area"] else ""
+        keyboard.append([InlineKeyboardButton(f"📍 {label}{area}", callback_data=f"setup_addr_{a['index']}")])
+
     await context.bot.send_message(
         chat_id,
-        "✅ Zepto connected!\n\n*Select your delivery address for this session:*",
+        "✅ Zepto connected!\n\n*Select your delivery address:*",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown",
     )
@@ -495,18 +506,36 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── Address selection at session setup ──
     elif data.startswith("setup_addr_"):
-        address_id = int(data.split("_")[2])
-        address = address_mgr.get(address_id)
+        idx = int(data.split("_")[2])
+        addresses = context.bot_data.get("zepto_addresses", [])
+        address = next((a for a in addresses if a["index"] == idx), None)
         if not address:
             await query.edit_message_text("❌ Address not found.")
             return
+
         context.bot_data["selected_address"] = address
         await query.edit_message_text(
-            f"✅ Delivering to *{address['label']}* — {address['pin_code']}\n\n"
-            "You're all set! Type items to add to cart:\n"
-            "  • `add milk`\n  • `add bread, eggs`",
+            f"⏳ Setting delivery address to *{address['label']}*...",
             parse_mode="Markdown",
         )
+
+        loop = asyncio.get_event_loop()
+        ok = await loop.run_in_executor(None, lambda: zepto.select_zepto_address(idx))
+
+        if ok:
+            await context.bot.send_message(
+                chat_id,
+                f"✅ Delivering to *{address['label']}*\n\n"
+                "You're all set! Type items to add to cart:\n"
+                "  • `add milk`\n  • `add bread, eggs`",
+                parse_mode="Markdown",
+            )
+        else:
+            await context.bot.send_message(
+                chat_id,
+                f"⚠️ Address set in bot but could not confirm on Zepto. Will retry at checkout.\n\n"
+                "Type items to start adding to cart.",
+            )
 
     # ── Order confirmation (after 60s timeout) ──
     elif data == "order_confirm":
