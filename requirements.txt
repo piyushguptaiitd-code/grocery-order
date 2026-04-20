@@ -1,0 +1,7 @@
+python-telegram-bot==21.7
+requests==2.32.3
+selenium==4.26.1
+cryptography==43.0.0
+python-dotenv==1.0.1
+Pillow==11.1.0
+beautifulsoup4==4.12.3
