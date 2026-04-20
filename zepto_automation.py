@@ -147,10 +147,16 @@ class ZeptoAutomation:
         """
         try:
             self.start()
-            # If cookies restored a valid session, skip OTP entirely
+            # If cookies restored a valid session, verify by checking for saved addresses
             if self.is_logged_in:
-                logger.info("[Login P1] Already logged in via saved cookies — skipping OTP")
-                return True, "✅ Already logged in (session restored from cookies)!"
+                logger.info("[Login P1] Checking if session has saved addresses...")
+                _, addresses = self.get_saved_addresses()
+                if not addresses:
+                    logger.warning("[Login P1] Session has no saved addresses — not actually logged in, will re-login")
+                    self.is_logged_in = False
+                else:
+                    logger.info(f"[Login P1] Session verified — found {len(addresses)} saved addresses")
+                    return True, "✅ Already logged in (session restored from cookies)!"
             self.driver.get(ZEPTO_BASE_URL)
             time.sleep(3)
             self.take_screenshot("/tmp/zepto_step1_home.png")
