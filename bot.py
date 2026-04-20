@@ -227,6 +227,37 @@ async def _prompt_address_selection(chat_id: int, context: ContextTypes.DEFAULT_
     )
 
 
+async def checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manually trigger order placement without waiting for timeout."""
+    if not allowed(update):
+        return await reject(update)
+
+    chat_id = update.effective_chat.id
+    cart: CartManager = context.bot_data.get("cart")
+    address = context.bot_data.get("selected_address")
+
+    if not cart or cart.is_empty():
+        await update.message.reply_text("Cart is empty. Add items first with `add milk, bread` etc.", parse_mode="Markdown")
+        return
+
+    if not address:
+        await update.message.reply_text("No delivery address selected. Use /start to set one.")
+        return
+
+    # Show order confirmation (same as timeout handler)
+    keyboard = [
+        [InlineKeyboardButton("✅ Yes, place order", callback_data="order_confirm")],
+        [InlineKeyboardButton("➕ Keep adding items", callback_data="order_cancel")],
+    ]
+    await update.message.reply_text(
+        f"{cart.format_cart()}\n\n"
+        f"📍 Deliver to: *{address['label']}*\n\n"
+        f"Place order now?",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown",
+    )
+
+
 async def view_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not allowed(update):
         return await reject(update)
@@ -643,6 +674,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("view_cart", view_cart))
+    app.add_handler(CommandHandler("checkout", checkout))
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CommandHandler("history", history))
     app.add_handler(CommandHandler("login", login))
