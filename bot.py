@@ -350,12 +350,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     db.add_user(user.id, user.full_name)
 
-    # Route OTP reply
+    # Route login OTP reply
     if context.bot_data.get("awaiting_otp"):
         otp_future = context.bot_data.get("otp_future")
         if otp_future and not otp_future.done():
             otp_future.set_result(text)
-            logger.info(f"[OTP] Received OTP: {text}")
+            logger.info(f"[OTP] Received login OTP: {text}")
+        return
+
+    # Route payment OTP reply
+    if context.bot_data.get("awaiting_payment_otp"):
+        otp_future = context.bot_data.get("payment_otp_future")
+        if otp_future and not otp_future.done():
+            otp_future.set_result(text)
+            logger.info(f"[OTP] Received payment OTP: {text}")
         return
 
     # Check for checkout/place order text commands
@@ -592,7 +600,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Type items to start adding to cart.",
             )
 
-    # ── Order confirmation (after 60s timeout) ──
+    # ── Order confirmation — navigate to checkout and show payment options ──
     elif data == "order_confirm":
         address = context.bot_data.get("selected_address")
         cart: CartManager = context.bot_data.get("cart")
@@ -600,44 +608,116 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("Cart is empty.")
             return
 
-        total = cart.get_total()
-        items = cart.get_items()
-        items_json = json.dumps(items)
+        # Save order context for later (after payment completes)
+        context.bot_data["pending_order"] = {
+            "items_json": json.dumps(cart.get_items()),
+            "total": cart.get_total(),
+            "address": address,
+        }
 
         await query.edit_message_text(
-            f"📦 Placing order to *{address['label']}*...\n\n{cart.format_cart()}\n\n⏳ Processing...",
+            f"📦 Going to checkout for *{address['label']}*...\n\n⏳ Loading payment options...",
             parse_mode="Markdown",
         )
 
         loop = asyncio.get_event_loop()
-        order = await loop.run_in_executor(
-            None,
-            lambda: zepto.select_address_and_checkout(),
+        ok = await loop.run_in_executor(None, zepto.go_to_checkout)
+        if not ok:
+            await context.bot.send_message(chat_id, "❌ Could not reach checkout. Please try again.")
+            return
+
+        options = await loop.run_in_executor(None, zepto.get_payment_options)
+        if not options:
+            await context.bot.send_message(chat_id, "❌ Could not load payment options. Please check Zepto manually.")
+            return
+
+        keyboard = [[InlineKeyboardButton(o["label"], callback_data=f"pay_opt_{o['index']}")] for o in options]
+        context.bot_data["payment_options"] = options
+        await context.bot.send_message(
+            chat_id,
+            "💳 *Select payment method:*",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown",
         )
 
-        if order:
-            db.create_order(items_json, address["address_id"], total, order.order_id, "saved_payment")
-            cart.clear()
-            # Clear selected address so next order starts fresh with address selection
-            context.bot_data.pop("selected_address", None)
-            await context.bot.send_message(
-                chat_id,
-                f"🎉 *Order Placed!*\n\n"
-                f"Order ID: `{order.order_id}`\n"
-                f"Delivery to: *{address['label']}*\n"
-                f"Total: ₹{total:.0f}\n"
-                f"ETA: {order.estimated_delivery}\n\n"
-                f"Cart cleared. Use /start to begin the next order!",
-                parse_mode="Markdown",
-            )
+    # ── Payment option selected ──
+    elif data.startswith("pay_opt_"):
+        idx = int(data.split("_")[2])
+        options = context.bot_data.get("payment_options", [])
+        option = next((o for o in options if o["index"] == idx), None)
+        if not option:
+            await query.edit_message_text("❌ Payment option not found.")
+            return
+
+        await query.edit_message_text(f"💳 Processing *{option['label']}*...", parse_mode="Markdown")
+
+        loop = asyncio.get_event_loop()
+        otp_required, msg = await loop.run_in_executor(
+            None, lambda: zepto.select_payment_option(option["label"])
+        )
+
+        if otp_required:
+            # Set up async wait for payment OTP (same pattern as login OTP)
+            otp_future = loop.create_future()
+            context.bot_data["payment_otp_future"] = otp_future
+            context.bot_data["awaiting_payment_otp"] = True
+            await context.bot.send_message(chat_id, msg)
+
+            async def wait_for_payment_otp():
+                try:
+                    otp = await asyncio.wait_for(asyncio.wrap_future(otp_future), timeout=120)
+                except asyncio.TimeoutError:
+                    context.bot_data["awaiting_payment_otp"] = False
+                    context.bot_data.pop("payment_otp_future", None)
+                    await context.bot.send_message(chat_id, "⏰ Payment OTP timed out.")
+                    return
+
+                context.bot_data["awaiting_payment_otp"] = False
+                context.bot_data.pop("payment_otp_future", None)
+                await context.bot.send_message(chat_id, "⏳ Entering payment OTP...")
+
+                order = await loop.run_in_executor(None, lambda: zepto.enter_payment_otp(otp))
+                await _finish_order(chat_id, context, order)
+
+            asyncio.create_task(wait_for_payment_otp())
         else:
-            await context.bot.send_message(chat_id, "❌ Order failed. Please try again or check Zepto account.")
+            # No OTP needed — check if order went through
+            await context.bot.send_message(chat_id, msg)
+            order = await loop.run_in_executor(None, zepto._capture_order_confirmation)
+            await _finish_order(chat_id, context, order)
 
     elif data == "order_cancel":
         cart: CartManager = context.bot_data.get("cart")
         if cart:
             cart._reset_timer()
         await query.edit_message_text("Ok! Keep adding items. Timer reset. ⏱")
+
+
+async def _finish_order(chat_id: int, context: ContextTypes.DEFAULT_TYPE, order):
+    """Finalise order in DB, clear cart, send confirmation."""
+    pending = context.bot_data.pop("pending_order", {})
+    address = pending.get("address", {})
+    total = pending.get("total", 0.0)
+    items_json = pending.get("items_json", "[]")
+    cart: CartManager = context.bot_data.get("cart")
+
+    if order:
+        db.create_order(items_json, 0, total, order.order_id, "saved_payment")
+        if cart:
+            cart.clear()
+        context.bot_data.pop("selected_address", None)
+        await context.bot.send_message(
+            chat_id,
+            f"🎉 *Order Placed!*\n\n"
+            f"Order ID: `{order.order_id}`\n"
+            f"Delivery to: *{address.get('label', '?')}*\n"
+            f"Total: ₹{total:.0f}\n"
+            f"ETA: {order.estimated_delivery}\n\n"
+            "Cart cleared. Use /start to begin the next order!",
+            parse_mode="Markdown",
+        )
+    else:
+        await context.bot.send_message(chat_id, "❌ Order failed. Please check Zepto manually.")
 
 
 async def handle_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):

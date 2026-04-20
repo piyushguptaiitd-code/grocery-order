@@ -630,61 +630,184 @@ class ZeptoAutomation:
             logger.error(f"Failed to view cart: {e}")
             return []
 
-    def select_address_and_checkout(self) -> Optional[ZeptoOrder]:
-        """Proceed to checkout and confirm payment. Address should already be selected."""
+    def go_to_checkout(self) -> bool:
+        """Click the checkout button to navigate to the checkout/payment page."""
         try:
-            # Go to checkout
             checkout_btn = self.wait.until(
-                EC.element_to_be_clickable((By.XPATH, "//button[contains(text(),'Checkout') or contains(text(),'Proceed') or contains(@class,'checkout')]"))
+                EC.element_to_be_clickable((By.XPATH,
+                    "//button[contains(text(),'Checkout') or contains(text(),'Proceed') or contains(@class,'checkout')]"
+                ))
             )
             checkout_btn.click()
             time.sleep(3)
+            logger.info("[Checkout] Navigated to checkout page")
+            return True
+        except Exception as e:
+            logger.error(f"[Checkout] Failed: {e}")
+            return False
 
-            # Proceed to payment
-            pay_btn = self.wait.until(
-                EC.element_to_be_clickable((By.XPATH, "//button[contains(text(),'Pay') or contains(text(),'Place Order') or contains(text(),'Confirm')]"))
+    def get_payment_options(self) -> List[dict]:
+        """Scrape available payment options from the checkout page."""
+        try:
+            raw = self.driver.execute_script("""
+                var seen = {};
+                var result = [];
+                var candidates = Array.from(document.querySelectorAll('div, li, label, button'));
+                candidates.forEach(function(el) {
+                    var text = (el.innerText || '').trim();
+                    var firstLine = text.split('\\n')[0].trim();
+                    var rect = el.getBoundingClientRect();
+                    var isVisible = rect.width > 50 && rect.height > 10 && rect.height < 200;
+                    var isPayment = /upi|gpay|phonepe|paytm|bhim|credit|debit|card|cash|cod|net.?bank|wallet|rupay|visa|master/i.test(text);
+                    var notTooDeep = el.children.length < 8;
+                    var shortLabel = firstLine.length > 1 && firstLine.length < 80;
+                    if (isVisible && isPayment && notTooDeep && shortLabel && !seen[firstLine]) {
+                        seen[firstLine] = true;
+                        result.push({ label: firstLine });
+                    }
+                });
+                return result.slice(0, 8);
+            """)
+            options = [{"index": i, "label": o["label"]} for i, o in enumerate(raw or [])]
+            logger.info(f"[Payment] Options: {[o['label'] for o in options]}")
+            return options
+        except Exception as e:
+            logger.error(f"[Payment] get_payment_options failed: {e}")
+            return []
+
+    def select_payment_option(self, label: str) -> tuple:
+        """
+        Click the payment option with the given label, then click Pay.
+        Returns (otp_required: bool, message: str).
+        """
+        try:
+            # Click the payment option
+            clicked = False
+            for xpath in [
+                f"//*[normalize-space(text())='{label}']",
+                f"//*[contains(normalize-space(text()),'{label[:30]}')]",
+            ]:
+                try:
+                    el = self.driver.find_element(By.XPATH, xpath)
+                    try:
+                        el.click()
+                    except Exception:
+                        self.driver.execute_script("arguments[0].click();", el)
+                    time.sleep(2)
+                    logger.info(f"[Payment] Clicked option: {label}")
+                    clicked = True
+                    break
+                except NoSuchElementException:
+                    continue
+
+            if not clicked:
+                logger.warning(f"[Payment] Could not find option: {label}")
+
+            # Click Pay / Place Order button
+            for xpath in [
+                "//button[contains(text(),'Pay') or contains(text(),'Place Order')]",
+                "//button[contains(text(),'Confirm')]",
+            ]:
+                try:
+                    btn = self.driver.find_element(By.XPATH, xpath)
+                    btn.click()
+                    time.sleep(3)
+                    logger.info("[Payment] Clicked Pay button")
+                    break
+                except NoSuchElementException:
+                    continue
+
+            # Check if OTP input appeared
+            otp_inputs = self.driver.find_elements(
+                By.XPATH,
+                "//input[@maxlength='1'] | //input[contains(@placeholder,'OTP') or contains(@placeholder,'otp') or contains(@placeholder,'PIN') or @autocomplete='one-time-code']"
             )
-            pay_btn.click()
-            time.sleep(3)
+            visible_otp = [f for f in otp_inputs if f.is_displayed()]
+            if visible_otp:
+                logger.info("[Payment] OTP input detected")
+                return True, "🔐 Payment OTP required. Please reply with the OTP sent to your phone."
 
-            # Select default saved payment (card/UPI already saved on account)
-            try:
-                saved_payment = self.driver.find_element(
-                    By.XPATH,
-                    "(//div[contains(@class,'payment-option') or contains(@class,'saved-card') or contains(@class,'saved-upi')])[1]"
-                )
-                saved_payment.click()
-                time.sleep(1)
-
-                confirm_pay_btn = self.wait.until(
-                    EC.element_to_be_clickable((By.XPATH, "//button[contains(text(),'Pay') or contains(text(),'Confirm') or contains(text(),'Place')]"))
-                )
-                confirm_pay_btn.click()
-                time.sleep(5)
-            except NoSuchElementException:
-                logger.warning("Could not find saved payment method — manual intervention needed")
-                return None
-
-            # Capture order confirmation
-            try:
-                order_id_el = self.wait.until(
-                    EC.presence_of_element_located((By.XPATH, "//*[contains(text(),'Order') and (contains(text(),'#') or contains(text(),'placed'))]"))
-                )
-                order_text = order_id_el.text
-                logger.info(f"Order placed: {order_text}")
-                return ZeptoOrder(
-                    order_id=order_text,
-                    status="placed",
-                    total=0.0,
-                    estimated_delivery="10 minutes",
-                )
-            except TimeoutException:
-                logger.warning("Order confirmation element not found")
-                return ZeptoOrder(order_id="unknown", status="placed", total=0.0, estimated_delivery="10 minutes")
+            return False, "✅ Payment submitted — checking confirmation..."
 
         except Exception as e:
-            logger.error(f"Checkout failed: {e}")
+            logger.error(f"[Payment] select_payment_option failed: {e}")
+            return False, f"❌ Payment selection failed: {e}"
+
+    def enter_payment_otp(self, otp: str) -> Optional[ZeptoOrder]:
+        """Enter payment OTP and confirm. Returns ZeptoOrder on success."""
+        try:
+            otp = otp.strip()
+            logger.info(f"[Payment] Entering OTP: {otp}")
+
+            # Try individual digit inputs
+            digit_inputs = self.driver.find_elements(By.XPATH, "//input[@maxlength='1']")
+            visible_digits = [f for f in digit_inputs if f.is_displayed()]
+            if len(visible_digits) >= len(otp):
+                for i, digit in enumerate(otp):
+                    visible_digits[i].click()
+                    visible_digits[i].send_keys(digit)
+                    time.sleep(0.2)
+                logger.info("[Payment] Entered OTP into digit fields")
+            else:
+                # Single OTP field
+                otp_field = None
+                for selector in [
+                    (By.CSS_SELECTOR, "input[autocomplete='one-time-code']"),
+                    (By.XPATH, "//input[contains(@placeholder,'OTP') or contains(@placeholder,'PIN')]"),
+                    (By.XPATH, "//input[@type='number' or @type='tel']"),
+                ]:
+                    try:
+                        fields = self.driver.find_elements(*selector)
+                        for f in fields:
+                            if f.is_displayed():
+                                otp_field = f
+                                break
+                        if otp_field:
+                            break
+                    except Exception:
+                        continue
+
+                if otp_field:
+                    otp_field.clear()
+                    otp_field.send_keys(otp)
+                    logger.info("[Payment] Entered OTP into single field")
+
+            time.sleep(2)
+
+            # Click Confirm/Verify/Submit after OTP
+            for xpath in [
+                "//button[contains(text(),'Confirm') or contains(text(),'Verify') or contains(text(),'Submit')]",
+                "//button[contains(text(),'Pay')]",
+            ]:
+                try:
+                    btn = self.driver.find_element(By.XPATH, xpath)
+                    btn.click()
+                    time.sleep(5)
+                    logger.info("[Payment] Clicked confirm after OTP")
+                    break
+                except NoSuchElementException:
+                    continue
+
+            return self._capture_order_confirmation()
+
+        except Exception as e:
+            logger.error(f"[Payment] enter_payment_otp failed: {e}")
             return None
+
+    def _capture_order_confirmation(self) -> ZeptoOrder:
+        """Wait for and parse the order confirmation screen."""
+        try:
+            order_id_el = self.wait.until(
+                EC.presence_of_element_located((By.XPATH,
+                    "//*[contains(text(),'Order') and (contains(text(),'#') or contains(text(),'placed') or contains(text(),'confirmed'))]"
+                ))
+            )
+            order_text = order_id_el.text
+            logger.info(f"[Payment] Order confirmed: {order_text}")
+            return ZeptoOrder(order_id=order_text, status="placed", total=0.0, estimated_delivery="10 minutes")
+        except TimeoutException:
+            logger.warning("[Payment] Order confirmation element not found — assuming placed")
+            return ZeptoOrder(order_id="unknown", status="placed", total=0.0, estimated_delivery="10 minutes")
 
     def take_screenshot(self, path: str = "/tmp/zepto_screenshot.png") -> str:
         """Capture current browser state for confirmation."""
