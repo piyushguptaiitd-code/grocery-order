@@ -824,30 +824,45 @@ class ZeptoAutomation:
         return added
 
     def go_to_checkout(self) -> bool:
-        """Click cart icon (top-right) on current page, then proceed to checkout."""
+        """Click the floating cart button or cart icon, then proceed to checkout."""
         try:
             self.take_screenshot("/tmp/zepto_checkout_step1_before.png")
             logger.info(f"[Checkout] Current page: {self.driver.current_url}")
 
-            # Click the cart icon in the top-right header
-            cart_clicked = False
-            for selector in [
-                (By.XPATH, "//*[@data-testid='cart-icon']"),
-                (By.XPATH, "//*[@data-testid='cart']"),
-                (By.XPATH, "//a[contains(@href,'cart')]"),
-                (By.XPATH, "//*[contains(@aria-label,'cart') or contains(@aria-label,'Cart')]"),
-                (By.XPATH, "//header//*[contains(@class,'cart')]"),
-                (By.XPATH, "//*[name()='svg' and ancestor::a[contains(@href,'cart')]]"),
-            ]:
-                try:
-                    el = WebDriverWait(self.driver, 4).until(EC.element_to_be_clickable(selector))
-                    self.driver.execute_script("arguments[0].click();", el)
-                    time.sleep(2)
-                    cart_clicked = True
-                    logger.info(f"[Checkout] Clicked cart icon via {selector[1][:60]}")
-                    break
-                except TimeoutException:
-                    continue
+            # Try JS first: find the bottom floating "Cart N item(s)" pill button
+            cart_clicked = self.driver.execute_script("""
+                var btn = Array.from(document.querySelectorAll('button, a, div')).find(function(el) {
+                    var t = (el.innerText || '').trim().toLowerCase();
+                    var rect = el.getBoundingClientRect();
+                    var isBottom = rect.bottom > window.innerHeight * 0.7;
+                    var isCartPill = /^cart/.test(t) && /item/.test(t);
+                    return isBottom && isCartPill && rect.width > 80;
+                });
+                if (btn) { btn.click(); return true; }
+                return false;
+            """)
+            if cart_clicked:
+                logger.info("[Checkout] Clicked bottom floating cart pill via JS")
+                time.sleep(2)
+
+            # Fallback: top-right cart icon selectors
+            if not cart_clicked:
+                for selector in [
+                    (By.XPATH, "//*[@data-testid='cart-icon']"),
+                    (By.XPATH, "//*[@data-testid='cart']"),
+                    (By.XPATH, "//a[contains(@href,'cart')]"),
+                    (By.XPATH, "//*[contains(@aria-label,'cart') or contains(@aria-label,'Cart')]"),
+                    (By.XPATH, "//header//*[contains(@class,'cart')]"),
+                ]:
+                    try:
+                        el = WebDriverWait(self.driver, 4).until(EC.element_to_be_clickable(selector))
+                        self.driver.execute_script("arguments[0].click();", el)
+                        time.sleep(2)
+                        cart_clicked = True
+                        logger.info(f"[Checkout] Clicked cart icon via {selector[1][:60]}")
+                        break
+                    except TimeoutException:
+                        continue
 
             self.take_screenshot("/tmp/zepto_checkout_step2_after_cart_click.png")
             logger.info(f"[Checkout] cart_clicked={cart_clicked}, url={self.driver.current_url}")
