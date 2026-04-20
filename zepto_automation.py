@@ -70,16 +70,19 @@ class ZeptoAutomation:
             self.is_logged_in = False
             logger.info("Selenium driver stopped")
 
-    def login(self, phone: str, otp_callback) -> bool:
-        """Login to Zepto via phone + OTP. otp_callback(phone) must return OTP string."""
+    def initiate_login(self, phone: str) -> tuple:
+        """
+        Phase 1: Open Zepto, find login button, enter phone, trigger OTP.
+        Returns (success: bool, message: str)
+        """
         try:
             self.start()
             self.driver.get(ZEPTO_BASE_URL)
             time.sleep(3)
             self.take_screenshot("/tmp/zepto_step1_home.png")
-            logger.info(f"Step1 — title: {self.driver.title}, url: {self.driver.current_url}")
+            logger.info(f"[Login P1] title='{self.driver.title}' url={self.driver.current_url}")
 
-            # Try multiple selectors to open login modal
+            # Open login modal
             login_opened = False
             for selector in [
                 (By.XPATH, "//button[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'login')]"),
@@ -90,39 +93,38 @@ class ZeptoAutomation:
                 (By.XPATH, "//*[contains(@aria-label,'login') or contains(@aria-label,'sign in')]"),
             ]:
                 try:
-                    el = self.driver.find_element(*selector)
-                    el.click()
+                    self.driver.find_element(*selector).click()
                     time.sleep(2)
                     login_opened = True
-                    logger.info(f"Opened login modal via selector: {selector}")
+                    logger.info(f"[Login P1] Opened login modal via {selector[1][:60]}")
                     break
                 except NoSuchElementException:
                     continue
 
             self.take_screenshot("/tmp/zepto_step2_modal.png")
-            logger.info(f"Step2 — login_opened={login_opened}, url: {self.driver.current_url}")
+            logger.info(f"[Login P1] login_opened={login_opened} url={self.driver.current_url}")
 
             # Find phone input
             phone_input = None
             for selector in [
                 (By.XPATH, "//input[@type='tel']"),
-                (By.XPATH, "//input[contains(@placeholder,'phone') or contains(@placeholder,'mobile') or contains(@placeholder,'number')]"),
-                (By.XPATH, "//input[contains(@placeholder,'Phone') or contains(@placeholder,'Mobile') or contains(@placeholder,'Number')]"),
                 (By.XPATH, "//input[@name='phone' or @name='mobile' or @name='phoneNumber']"),
-                (By.CSS_SELECTOR, "input[type='tel'], input[type='number'][maxlength='10']"),
+                (By.XPATH, "//input[contains(@placeholder,'phone') or contains(@placeholder,'Phone') or contains(@placeholder,'mobile') or contains(@placeholder,'Mobile')]"),
+                (By.CSS_SELECTOR, "input[type='tel'], input[maxlength='10']"),
             ]:
                 try:
                     phone_input = self.driver.find_element(*selector)
+                    logger.info(f"[Login P1] Found phone input via {selector}")
                     break
                 except NoSuchElementException:
                     continue
 
             if not phone_input:
                 self.take_screenshot("/tmp/zepto_step2_no_input.png")
-                logger.error("Could not find phone input field")
-                return False
+                logger.error("[Login P1] Could not find phone input field")
+                return False, "❌ Could not find phone input on Zepto. Check screenshot."
 
-            # Strip country code if present — Zepto expects 10 digits
+            # Zepto expects 10 digits — strip country code
             digits = phone.lstrip('+').replace(' ', '')
             if digits.startswith('91') and len(digits) == 12:
                 digits = digits[2:]
@@ -130,73 +132,103 @@ class ZeptoAutomation:
             phone_input.clear()
             phone_input.send_keys(digits)
             time.sleep(1)
+            logger.info(f"[Login P1] Entered phone digits: {digits}")
 
-            # Submit phone
+            # Click submit / Send OTP button
+            submitted = False
             for selector in [
                 (By.XPATH, "//button[@type='submit']"),
-                (By.XPATH, "//button[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'continue')]"),
                 (By.XPATH, "//button[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'send otp')]"),
                 (By.XPATH, "//button[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'get otp')]"),
+                (By.XPATH, "//button[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'continue')]"),
             ]:
                 try:
-                    btn = self.driver.find_element(*selector)
-                    btn.click()
+                    self.driver.find_element(*selector).click()
+                    submitted = True
+                    logger.info(f"[Login P1] Clicked submit via {selector[1][:60]}")
                     break
                 except NoSuchElementException:
                     continue
-            else:
+
+            if not submitted:
                 phone_input.send_keys(Keys.RETURN)
+                logger.info("[Login P1] Submitted via RETURN key")
 
             time.sleep(2)
             self.take_screenshot("/tmp/zepto_step3_otp_screen.png")
-            logger.info(f"Step3 — OTP screen, url: {self.driver.current_url}")
+            logger.info(f"[Login P1] OTP screen url={self.driver.current_url}")
+            return True, f"📩 OTP sent to {phone}! Please reply with the OTP."
 
-            # Wait for OTP from Telegram
-            otp = otp_callback(phone)
-            if not otp:
-                logger.error("No OTP received from user")
-                return False
+        except Exception as e:
+            logger.error(f"[Login P1] Exception: {e}")
+            self.take_screenshot("/tmp/zepto_login_error.png")
+            return False, f"❌ Login initiation failed: {e}"
 
+    def complete_login(self, otp: str) -> tuple:
+        """
+        Phase 2: Enter the OTP received by user.
+        Returns (success: bool, message: str)
+        """
+        try:
             otp = otp.strip()
-            logger.info(f"Got OTP: {otp}")
+            logger.info(f"[Login P2] Entering OTP: {otp}")
 
-            # Try individual digit inputs first (most common on Zepto)
+            # Individual digit inputs (most common on Zepto)
             otp_inputs = self.driver.find_elements(By.XPATH, "//input[@maxlength='1']")
             if len(otp_inputs) >= len(otp):
                 for i, digit in enumerate(otp):
                     otp_inputs[i].click()
                     otp_inputs[i].send_keys(digit)
                     time.sleep(0.2)
+                logger.info(f"[Login P2] Entered OTP into {len(otp_inputs)} digit fields")
             else:
-                # Single OTP input field
+                # Single OTP input
+                otp_field = None
                 for selector in [
-                    (By.XPATH, "//input[@type='number' or @type='tel' or @type='text'][@maxlength]"),
-                    (By.XPATH, "//input[contains(@placeholder,'OTP') or contains(@placeholder,'otp') or contains(@placeholder,'code')]"),
                     (By.CSS_SELECTOR, "input[autocomplete='one-time-code']"),
+                    (By.XPATH, "//input[contains(@placeholder,'OTP') or contains(@placeholder,'otp') or contains(@placeholder,'code')]"),
+                    (By.XPATH, "//input[@type='number' or @type='tel'][@maxlength]"),
                 ]:
                     try:
                         otp_field = self.driver.find_element(*selector)
-                        otp_field.clear()
-                        otp_field.send_keys(otp)
                         break
                     except NoSuchElementException:
                         continue
-                else:
-                    logger.error("Could not find OTP input field")
-                    return False
+
+                if not otp_field:
+                    logger.error("[Login P2] Could not find OTP input field")
+                    self.take_screenshot("/tmp/zepto_step4_no_otp_field.png")
+                    return False, "❌ Could not find OTP input field. Check screenshot."
+
+                otp_field.clear()
+                otp_field.send_keys(otp)
+                logger.info("[Login P2] Entered OTP into single field")
 
             time.sleep(3)
             self.take_screenshot("/tmp/zepto_step4_after_otp.png")
-            logger.info(f"Step4 — after OTP, url: {self.driver.current_url}")
+            logger.info(f"[Login P2] After OTP url={self.driver.current_url}")
 
             self.is_logged_in = True
-            logger.info("Logged in to Zepto successfully")
-            return True
+            return True, "✅ Logged in to Zepto!"
 
         except Exception as e:
-            logger.error(f"Login failed: {e}")
+            logger.error(f"[Login P2] Exception: {e}")
             self.take_screenshot("/tmp/zepto_login_error.png")
+            return False, f"❌ OTP entry failed: {e}"
+
+    def login(self, phone: str, otp_callback) -> bool:
+        """Legacy single-call login (used by /login command)."""
+        success, msg = self.initiate_login(phone)
+        logger.info(msg)
+        if not success:
             return False
+        otp = otp_callback(phone)
+        if not otp:
+            logger.error("No OTP received")
+            return False
+        success, msg = self.complete_login(otp)
+        logger.info(msg)
+        return success
 
     def set_delivery_location(self, pin_code: str) -> bool:
         """Set delivery location by pin code."""

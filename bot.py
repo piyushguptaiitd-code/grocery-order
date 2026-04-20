@@ -142,41 +142,69 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _trigger_zepto_login(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    """Initiate Zepto OTP login and wait for OTP reply in chat."""
+    """Initiate Zepto OTP login — two phase: send OTP, then wait for reply."""
     global _otp_future
     loop = asyncio.get_event_loop()
-    _otp_future = loop.create_future()
-    context.bot_data["awaiting_otp"] = True
-
-    def otp_callback(ph):
-        future = asyncio.run_coroutine_threadsafe(asyncio.wrap_future(_otp_future), loop)
-        return future.result(timeout=120)
 
     async def do_login():
-        zepto.start()
-        success = await loop.run_in_executor(None, lambda: zepto.login(ZEPTO_PHONE, otp_callback))
-        context.bot_data["awaiting_otp"] = False
-
-        # Send debug screenshots so we can see what happened in the browser
         import os
-        for label, path in [("Home", "/tmp/zepto_step1_home.png"), ("Modal", "/tmp/zepto_step2_modal.png"),
-                             ("OTP screen", "/tmp/zepto_step3_otp_screen.png"), ("After OTP", "/tmp/zepto_step4_after_otp.png"),
-                             ("Error", "/tmp/zepto_login_error.png")]:
-            if os.path.exists(path):
-                try:
-                    await context.bot.send_photo(chat_id, photo=open(path, "rb"), caption=f"🖥 {label}")
-                except Exception:
-                    pass
+
+        def _send_screenshots(steps):
+            for label, path in steps:
+                if os.path.exists(path):
+                    try:
+                        asyncio.run_coroutine_threadsafe(
+                            context.bot.send_photo(chat_id, photo=open(path, "rb"), caption=f"🖥 {label}"),
+                            loop
+                        ).result(timeout=10)
+                    except Exception:
+                        pass
+
+        # Phase 1: navigate to Zepto and trigger OTP
+        success, msg = await loop.run_in_executor(None, lambda: zepto.initiate_login(ZEPTO_PHONE))
+        logger.info(f"[Login] Phase1 result: {msg}")
+
+        _send_screenshots([
+            ("Step 1 — Home", "/tmp/zepto_step1_home.png"),
+            ("Step 2 — Login modal", "/tmp/zepto_step2_modal.png"),
+            ("Step 3 — OTP screen", "/tmp/zepto_step3_otp_screen.png"),
+            ("Error", "/tmp/zepto_login_error.png"),
+        ])
+
+        await context.bot.send_message(chat_id, msg)
+
+        if not success:
+            return
+
+        # Phase 2: wait for OTP reply in Telegram
+        _otp_future = loop.create_future()
+        context.bot_data["awaiting_otp"] = True
+
+        try:
+            otp = await asyncio.wait_for(asyncio.wrap_future(_otp_future), timeout=120)
+        except asyncio.TimeoutError:
+            context.bot_data["awaiting_otp"] = False
+            await context.bot.send_message(chat_id, "⏰ OTP timed out. Send /start to try again.")
+            return
+
+        context.bot_data["awaiting_otp"] = False
+        await context.bot.send_message(chat_id, "⏳ Entering OTP...")
+
+        success, msg = await loop.run_in_executor(None, lambda: zepto.complete_login(otp))
+        logger.info(f"[Login] Phase2 result: {msg}")
+
+        _send_screenshots([
+            ("Step 4 — After OTP", "/tmp/zepto_step4_after_otp.png"),
+            ("Error", "/tmp/zepto_login_error.png"),
+        ])
+
+        await context.bot.send_message(chat_id, msg)
 
         if success:
             context.bot_data["zepto_logged_in"] = True
-            await context.bot.send_message(chat_id, "✅ Logged in to Zepto!")
             await _prompt_address_selection(chat_id, context)
-        else:
-            await context.bot.send_message(chat_id, "❌ Login failed. Send /start to try again.")
 
     asyncio.create_task(do_login())
-    await context.bot.send_message(chat_id, "📩 OTP sent! Please reply with the OTP you received.")
 
 
 async def _prompt_address_selection(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
