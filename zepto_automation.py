@@ -720,10 +720,56 @@ class ZeptoAutomation:
             logger.error(f"[Cart] add_to_cart failed: {e}")
             return False
 
-    def get_browser_cart(self) -> List[dict]:
-        """Click the cart button and scrape items from the resulting cart page/panel."""
+    def get_address_modal_addresses(self) -> List[dict]:
+        """
+        Check if Zepto's 'Your Location' modal is open.
+        If so, return saved addresses scraped from it.
+        """
         try:
-            # Click the floating cart pill (same logic as go_to_checkout)
+            result = self.driver.execute_script("""
+                // Detect the modal by its heading text
+                var modal = Array.from(document.querySelectorAll('div, section')).find(function(el) {
+                    var t = (el.innerText || '').trim();
+                    var rect = el.getBoundingClientRect();
+                    return rect.width > 200 && rect.height > 200
+                        && /your location/i.test(t)
+                        && /saved addresses/i.test(t);
+                });
+                if (!modal) return null;
+
+                // Collect saved address cards — skip utility rows
+                var seen = {};
+                var results = [];
+                Array.from(modal.querySelectorAll('div, li, a')).forEach(function(el) {
+                    var text = (el.innerText || '').trim();
+                    var lines = text.split('\\n').map(function(l){ return l.trim(); }).filter(Boolean);
+                    if (lines.length < 2) return;
+                    var label = lines[0].replace(/•.*$/, '').trim();  // strip "• 1132.6 km"
+                    if (/use my current|add new|search|saved addresses|your location/i.test(label)) return;
+                    if (label.length > 30 || label.length < 2) return;
+                    var rect = el.getBoundingClientRect();
+                    if (rect.width < 150 || rect.height < 30) return;
+                    if (seen[label]) return;
+                    seen[label] = true;
+                    results.push({ label: label, address: lines.slice(1).join(', ') });
+                });
+                return results;
+            """)
+            if result:
+                addresses = [{"index": i, "label": a["label"], "address": a["address"]}
+                             for i, a in enumerate(result)]
+                logger.info(f"[AddressModal] Found {len(addresses)} addresses: {[a['label'] for a in addresses]}")
+                self.take_screenshot("/tmp/zepto_address_modal_detected.png")
+                return addresses
+            return []
+        except Exception as e:
+            logger.warning(f"[AddressModal] check failed: {e}")
+            return []
+
+    def get_browser_cart(self) -> List[dict]:
+        """Click the cart button and scrape product items above the Bill summary section."""
+        try:
+            # Click the floating cart pill
             clicked = self.driver.execute_script("""
                 var btn = Array.from(document.querySelectorAll('button, a, div')).find(function(el) {
                     var t = (el.innerText || '').trim().toLowerCase();
@@ -734,26 +780,34 @@ class ZeptoAutomation:
                 if (btn) { btn.click(); return true; }
                 return false;
             """)
-            if clicked:
-                logger.info("[BrowserCart] Clicked floating cart pill")
-            else:
-                logger.warning("[BrowserCart] Floating pill not found, cart may already be open")
+            logger.info(f"[BrowserCart] Cart pill clicked: {clicked}")
             time.sleep(3)
             self.take_screenshot("/tmp/zepto_cart_view.png")
 
-            # Scrape cart items via JS
+            # Scrape only items above the "Bill summary" heading
             raw = self.driver.execute_script("""
+                // Find Bill summary top — everything below it is billing, not products
+                var billEl = Array.from(document.querySelectorAll('*')).find(function(el) {
+                    var t = (el.innerText || '').trim().toLowerCase();
+                    var rect = el.getBoundingClientRect();
+                    return t === 'bill summary' && rect.width > 80;
+                });
+                var billTop = billEl ? billEl.getBoundingClientRect().top : window.innerHeight * 0.75;
+
                 var seen = {};
                 var results = [];
                 var candidates = Array.from(document.querySelectorAll('div, li'));
                 candidates.forEach(function(el) {
+                    var rect = el.getBoundingClientRect();
+                    // Only consider elements fully above the Bill summary
+                    if (rect.bottom >= billTop || rect.top < 0) return;
+                    if (rect.width < 80 || rect.height < 40 || rect.height > 250) return;
+
                     var text = (el.innerText || '').trim();
                     var lines = text.split('\\n').map(function(l){ return l.trim(); }).filter(Boolean);
-                    var hasPrice = text.includes('₹');
-                    var rect = el.getBoundingClientRect();
-                    var isVisible = rect.width > 80 && rect.height > 40 && rect.height < 250;
-                    var childCount = el.children.length;
-                    // Find a proper product name line: not a price, not a qty/weight, not a button label, not a discount tag
+                    if (!text.includes('₹') || el.children.length < 2 || el.children.length > 20) return;
+
+                    // Name: first line that is not a price/qty/button/discount
                     var name = lines.find(function(l){
                         return l.length > 5
                             && !/^₹/.test(l)
@@ -762,14 +816,14 @@ class ZeptoAutomation:
                             && !/^\\d+\\s*(g|kg|ml|L|pc|pcs|pack)/i.test(l)
                             && !/OFF$/i.test(l);
                     });
-                    if (hasPrice && isVisible && childCount >= 2 && childCount <= 20 && name) {
-                        var priceMatch = text.match(/₹\\s?([\\d,]+)/);
-                        var price = priceMatch ? priceMatch[1] : '';
-                        var key = name + price;
-                        if (!seen[key] && price) {
-                            seen[key] = true;
-                            results.push({ name: name, price: price });
-                        }
+                    if (!name) return;
+
+                    var priceMatch = text.match(/₹\\s?([\\d,]+)/);
+                    var price = priceMatch ? priceMatch[1] : '';
+                    var key = name + price;
+                    if (price && !seen[key]) {
+                        seen[key] = true;
+                        results.push({ name: name, price: price });
                     }
                 });
                 return results.slice(0, 20);

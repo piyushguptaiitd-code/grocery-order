@@ -346,14 +346,43 @@ async def checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def _check_address_modal(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """
+    Check if Zepto's address modal appeared. If so, show picker to user.
+    Returns True if modal was detected (caller should pause its flow).
+    """
+    loop = asyncio.get_event_loop()
+    addresses = await loop.run_in_executor(None, zepto.get_address_modal_addresses)
+    if not addresses:
+        return False
+
+    context.bot_data["zepto_addresses"] = addresses
+    keyboard = []
+    for a in addresses:
+        full = f"{a['label']} — {a['address']}" if a.get("address") else a["label"]
+        keyboard.append([InlineKeyboardButton(f"📍 {full}", callback_data=f"setup_addr_{a['index']}")])
+    await context.bot.send_message(
+        chat_id,
+        "📍 *Please select a delivery address:*",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown",
+    )
+    return True
+
+
 async def view_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not allowed(update):
         return await reject(update)
 
+    chat_id = update.effective_chat.id
     await update.message.reply_text("🛒 Fetching cart from Zepto...")
 
     loop = asyncio.get_event_loop()
     items = await loop.run_in_executor(None, zepto.get_browser_cart)
+
+    # Address modal may have appeared when cart opened
+    if await _check_address_modal(chat_id, context):
+        return
 
     if not items:
         await update.message.reply_text("Cart is empty on Zepto.")
@@ -743,6 +772,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ok = await loop.run_in_executor(None, zepto.go_to_checkout)
         if not ok:
             await context.bot.send_message(chat_id, "❌ Could not reach checkout. Please try again.")
+            return
+
+        # Address modal may have appeared on the cart/checkout page
+        if await _check_address_modal(chat_id, context):
+            await context.bot.send_message(chat_id, "Please select an address above, then type `checkout` again.")
             return
 
         options = await loop.run_in_executor(None, zepto.get_payment_options)
