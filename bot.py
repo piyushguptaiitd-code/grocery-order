@@ -148,7 +148,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(
             "👋 *Grocery Group Bot* is ready!\n\n"
-            f"📍 Delivering to: *{addr['label']}* — {addr['pin_code']}\n\n"
+            f"📍 Delivering to: *{addr['label']}*\n\n"
             "Just type items to add them to the cart:\n"
             "  • `add milk`\n"
             "  • `add bread, eggs, butter`\n\n"
@@ -247,6 +247,29 @@ async def _prompt_address_selection(chat_id: int, context: ContextTypes.DEFAULT_
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown",
     )
+
+
+HELP_TEXT = (
+    "🛒 *Grocery Bot Commands*\n\n"
+    "*Adding items:*\n"
+    "  `add milk` — search and add one item\n"
+    "  `add bread, eggs, butter` — add multiple\n\n"
+    "*Order:*\n"
+    "  `checkout` / `place order` — place order now\n"
+    "  `view cart` / `cart` — see current cart\n"
+    "  `cancel` / `clear cart` — clear and start over\n\n"
+    "*Account:*\n"
+    "  `/start` — connect Zepto / select address\n"
+    "  `history` / `past orders` — view past orders\n"
+    "  `help` — show this message\n\n"
+    "_All commands work as plain text too — no slash needed._"
+)
+
+
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not allowed(update):
+        return await reject(update)
+    await update.message.reply_text(HELP_TEXT, parse_mode="Markdown")
 
 
 async def checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -378,9 +401,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.info(f"[OTP] Received payment OTP: {text}")
         return
 
-    # Check for checkout/place order text commands
-    if any(keyword in text.lower() for keyword in ["place order", "checkout", "confirm order", "place"]):
+    # Inline text command routing
+    tl = text.lower().strip()
+    if any(tl == k or tl.startswith(k) for k in ["place order", "checkout", "confirm order", "place order now"]):
         await checkout(update, context)
+        return
+    if tl in ("view cart", "cart", "show cart", "/cart"):
+        await view_cart(update, context)
+        return
+    if tl in ("cancel", "clear cart", "reset"):
+        await cancel(update, context)
+        return
+    if tl in ("history", "past orders", "orders"):
+        await history(update, context)
+        return
+    if tl in ("help", "commands", "?"):
+        await help_cmd(update, context)
         return
 
     # Session guard: must be logged in and have address selected
@@ -597,19 +633,29 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         loop = asyncio.get_event_loop()
         ok = await loop.run_in_executor(None, lambda: zepto.select_zepto_address(address["label"]))
 
-        if ok:
+        if not ok:
+            await context.bot.send_message(
+                chat_id,
+                f"⚠️ Could not confirm address on Zepto. Will retry at checkout.",
+            )
+
+        # Show existing cart or ready message
+        cart: CartManager = context.bot_data.get("cart")
+        if cart and not cart.is_empty():
             await context.bot.send_message(
                 chat_id,
                 f"✅ Delivering to *{address['label']}*\n\n"
-                "You're all set! Type items to add to cart:\n"
-                "  • `add milk`\n  • `add bread, eggs`",
+                f"{cart.format_cart()}\n\n"
+                "Continue adding items or type `checkout` to place the order.",
                 parse_mode="Markdown",
             )
         else:
             await context.bot.send_message(
                 chat_id,
-                f"⚠️ Address set in bot but could not confirm on Zepto. Will retry at checkout.\n\n"
-                "Type items to start adding to cart.",
+                f"✅ Delivering to *{address['label']}*\n\n"
+                "Type items to add to cart:\n"
+                "  • `add milk`\n  • `add bread, eggs`",
+                parse_mode="Markdown",
             )
 
     # ── Order confirmation — navigate to checkout and show payment options ──
@@ -788,6 +834,7 @@ def main():
     )
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("view_cart", view_cart))
     app.add_handler(CommandHandler("checkout", checkout))
     app.add_handler(CommandHandler("cancel", cancel))

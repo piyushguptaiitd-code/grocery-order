@@ -90,21 +90,31 @@ class ZeptoAutomation:
             logger.error(f"[Cookies] Failed to load: {e}")
 
     def _check_session_valid(self) -> bool:
-        """Check if already logged in by looking for logged-in indicators on page."""
+        """Check if already logged in using JavaScript to inspect auth state."""
         try:
             self.driver.get(ZEPTO_BASE_URL)
-            time.sleep(3)  # Give page time to load cookies
-            # Check if we see logged-in elements (not login button)
-            login_btn = self.driver.find_elements(By.XPATH, "//button[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'login')]")
-            if login_btn:
-                logger.info("[Login] Login button visible — session expired or cookies invalid")
-                return False
-            # Check for user profile or account elements
-            profile = self.driver.find_elements(By.XPATH, "//*[@data-testid='profile'] | //*[contains(@class,'profile')] | //*[contains(text(),'Account')]")
-            # Also check for cart icon (if visible, user is logged in)
-            cart = self.driver.find_elements(By.XPATH, "//*[@data-testid='cart'] | //*[contains(@class,'cart')]")
-            is_logged = len(profile) > 0 or len(cart) > 0
-            logger.info(f"[Login] Session valid: {is_logged} (profile:{len(profile)}, cart:{len(cart)})")
+            time.sleep(4)
+            # Use JS to check for auth tokens in localStorage/cookies — more reliable than DOM checks
+            result = self.driver.execute_script("""
+                var cookies = document.cookie || '';
+                var ls = '';
+                try { ls = JSON.stringify(localStorage); } catch(e) {}
+                var hasAuth = cookies.includes('access_token') ||
+                              cookies.includes('refreshToken') ||
+                              cookies.includes('user_id') ||
+                              cookies.includes('authToken') ||
+                              ls.includes('user') ||
+                              ls.includes('token') ||
+                              ls.includes('auth');
+                // Also check if login modal is NOT present
+                var loginModal = document.querySelector('input[type="tel"]');
+                return { hasAuth: hasAuth, hasLoginModal: !!loginModal,
+                         cookieSnip: cookies.substring(0, 200), url: window.location.href };
+            """)
+            logger.info(f"[Login] Session check: {result}")
+            # Logged in if we have auth indicators AND no login modal
+            is_logged = result.get('hasAuth', False) and not result.get('hasLoginModal', True)
+            logger.info(f"[Login] Session valid: {is_logged}")
             return is_logged
         except Exception as e:
             logger.warning(f"[Login] Could not check session: {e}")
@@ -604,28 +614,43 @@ class ZeptoAutomation:
             return []
 
     def add_to_cart(self, product_index: int, query: str) -> bool:
-        """Add a product from the current search page to cart by index."""
+        """Add a product from the current search page to Zepto's cart by index."""
         try:
-            product_cards = self.driver.find_elements(
-                By.XPATH,
-                "//div[contains(@class,'product-card') or contains(@data-testid,'product')]"
-            )
-
-            if product_index >= len(product_cards):
-                return False
-
-            card = product_cards[product_index]
-            add_btn = card.find_element(
-                By.XPATH,
-                ".//button[contains(text(),'Add') or contains(@class,'add') or contains(@aria-label,'Add')]"
-            )
-            add_btn.click()
+            result = self.driver.execute_script("""
+                var idx = arguments[0];
+                var candidates = Array.from(document.querySelectorAll('div, article, section, li'));
+                var cards = candidates.filter(function(el) {
+                    var text = el.innerText || '';
+                    var hasPrice = text.includes('₹');
+                    var hasAdd = el.querySelector('button') !== null;
+                    var rect = el.getBoundingClientRect();
+                    var isVisible = rect.width > 50 && rect.height > 50;
+                    var notTooLarge = rect.width < 600;
+                    var childCount = el.children.length;
+                    return hasPrice && hasAdd && isVisible && notTooLarge && childCount >= 2 && childCount <= 20;
+                });
+                var seen = {};
+                var unique = [];
+                cards.forEach(function(el) {
+                    var rect = el.getBoundingClientRect();
+                    var key = Math.round(rect.top / 10) + '_' + Math.round(rect.left / 10);
+                    if (!seen[key]) { seen[key] = true; unique.push(el); }
+                });
+                if (idx >= unique.length) return false;
+                var card = unique[idx];
+                var buttons = Array.from(card.querySelectorAll('button'));
+                var addBtn = buttons.find(function(b) {
+                    var t = (b.innerText || '').trim().toLowerCase();
+                    return t === 'add' || t === '+';
+                }) || buttons[buttons.length - 1];
+                if (addBtn) { addBtn.click(); return true; }
+                return false;
+            """, product_index)
             time.sleep(2)
-            logger.info(f"Added product index {product_index} to cart")
-            return True
-
+            logger.info(f"[Cart] add_to_cart index={product_index} result={result}")
+            return bool(result)
         except Exception as e:
-            logger.error(f"Failed to add to cart: {e}")
+            logger.error(f"[Cart] add_to_cart failed: {e}")
             return False
 
     def view_cart(self) -> List[dict]:
