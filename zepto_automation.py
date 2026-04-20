@@ -173,7 +173,7 @@ class ZeptoAutomation:
             otp = otp.strip()
             logger.info(f"[Login P2] Entering OTP: {otp}")
 
-            # Individual digit inputs (most common on Zepto)
+            # Strategy 1: Individual digit inputs (most common on Zepto)
             otp_inputs = self.driver.find_elements(By.XPATH, "//input[@maxlength='1']")
             if len(otp_inputs) >= len(otp):
                 for i, digit in enumerate(otp):
@@ -182,30 +182,53 @@ class ZeptoAutomation:
                     time.sleep(0.2)
                 logger.info(f"[Login P2] Entered OTP into {len(otp_inputs)} digit fields")
             else:
-                # Single OTP input
+                # Strategy 2: Try multiple selector patterns for single OTP input
                 otp_field = None
                 for selector in [
                     (By.CSS_SELECTOR, "input[autocomplete='one-time-code']"),
-                    (By.XPATH, "//input[contains(@placeholder,'OTP') or contains(@placeholder,'otp') or contains(@placeholder,'code')]"),
-                    (By.XPATH, "//input[@type='number' or @type='tel'][@maxlength]"),
+                    (By.XPATH, "//input[contains(@placeholder,'OTP') or contains(@placeholder,'otp') or contains(@placeholder,'code') or contains(@placeholder,'OTP code')]"),
+                    (By.XPATH, "//input[@type='number' or @type='tel']"),
+                    (By.XPATH, "//input[not(@type) or @type='text' or @type='password'][@maxlength and @maxlength > '4']"),
+                    (By.CSS_SELECTOR, "input"),  # Any input as fallback
                 ]:
                     try:
-                        otp_field = self.driver.find_element(*selector)
-                        break
+                        found = self.driver.find_elements(*selector)
+                        # Pick the first visible one
+                        for el in found:
+                            if el.is_displayed():
+                                otp_field = el
+                                logger.info(f"[Login P2] Found OTP input via {selector}")
+                                break
+                        if otp_field:
+                            break
                     except NoSuchElementException:
                         continue
 
                 if not otp_field:
                     logger.error("[Login P2] Could not find OTP input field")
                     self.take_screenshot("/tmp/zepto_step4_no_otp_field.png")
-                    return False, "❌ Could not find OTP input field. Check screenshot."
-
-                otp_field.clear()
-                otp_field.send_keys(otp)
-                logger.info("[Login P2] Entered OTP into single field")
+                    # Try JavaScript as last resort
+                    try:
+                        self.driver.execute_script("document.querySelector('input').focus();")
+                        self.driver.execute_script(f"document.querySelector('input').value = '{otp}';")
+                        logger.info("[Login P2] Filled OTP via JavaScript")
+                    except Exception as e:
+                        logger.error(f"[Login P2] JavaScript fallback failed: {e}")
+                        return False, "❌ Could not find OTP input field. Check screenshot."
+                else:
+                    otp_field.clear()
+                    otp_field.send_keys(otp)
+                    logger.info("[Login P2] Entered OTP into single field")
 
             time.sleep(3)
             self.take_screenshot("/tmp/zepto_step4_after_otp.png")
+
+            # Debug: log all input fields on page
+            all_inputs = self.driver.find_elements(By.TAG_NAME, "input")
+            logger.info(f"[Login P2] Found {len(all_inputs)} input fields on page")
+            for i, inp in enumerate(all_inputs[:5]):  # Log first 5
+                logger.info(f"  Input {i}: type={inp.get_attribute('type')}, placeholder={inp.get_attribute('placeholder')}, maxlength={inp.get_attribute('maxlength')}, visible={inp.is_displayed()}")
+
             logger.info(f"[Login P2] After OTP url={self.driver.current_url}")
 
             self.is_logged_in = True
