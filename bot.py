@@ -348,6 +348,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.info(f"[OTP] Received OTP: {text}")
         return
 
+    # Check for checkout/place order text commands
+    if any(keyword in text.lower() for keyword in ["place order", "checkout", "confirm order", "place"]):
+        await checkout(update, context)
+        return
+
     # Session guard: must be logged in and have address selected
     if not context.bot_data.get("zepto_logged_in"):
         if context.bot_data.get("login_in_progress"):
