@@ -105,13 +105,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     db.add_user(user.id, user.full_name)
 
-    # Initialise cart for this session
+    # Initialise cart for this session (no timeout — user manually triggers checkout)
     if "cart" not in context.bot_data:
         context.bot_data["cart"] = CartManager(
             db,
-            on_timeout=lambda: asyncio.create_task(
-                cart_timeout_handler({"bot": context.bot, "chat_id": chat_id, "cart": context.bot_data["cart"], "bot_data": context.bot_data})
-            ),
+            on_timeout=lambda: None,  # No auto-timeout behavior
         )
 
     # If not logged in, trigger Zepto login flow
@@ -437,9 +435,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if "cart" not in context.bot_data:
         context.bot_data["cart"] = CartManager(
             db,
-            on_timeout=lambda: asyncio.create_task(
-                cart_timeout_handler({"bot": context.bot, "chat_id": chat_id, "cart": context.bot_data["cart"], "bot_data": context.bot_data})
-            ),
+            on_timeout=lambda: None,  # No auto-timeout
         )
 
     items = parse_items(text)
