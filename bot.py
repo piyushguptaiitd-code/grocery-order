@@ -520,7 +520,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         loop = asyncio.get_event_loop()
-        ok = await loop.run_in_executor(None, lambda: zepto.select_zepto_address(idx))
+        ok = await loop.run_in_executor(None, lambda: zepto.select_zepto_address(address["label"]))
 
         if ok:
             await context.bot.send_message(
