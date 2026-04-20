@@ -219,23 +219,35 @@ async def _trigger_zepto_login(chat_id: int, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def _prompt_address_selection(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    """Fetch saved addresses from Zepto and show for selection."""
-    await context.bot.send_message(chat_id, "📍 Fetching your saved addresses from Zepto...")
-
+    """Use address already selected in browser, or show modal to pick one."""
     loop = asyncio.get_event_loop()
+
+    # First: check if browser already has an address selected
+    current = await loop.run_in_executor(None, zepto.get_current_address)
+    if current:
+        context.bot_data["selected_address"] = current
+        cart: CartManager = context.bot_data.get("cart")
+        msg = f"📍 Delivering to: *{current['label']}*\n\n"
+        if cart and not cart.is_empty():
+            msg += cart.format_cart() + "\n\nContinue adding or type `checkout`."
+        else:
+            msg += "Type items to add to cart:\n  • `add milk`\n  • `add bread, eggs`"
+        await context.bot.send_message(chat_id, msg, parse_mode="Markdown")
+        return
+
+    # No address in browser — try the modal
+    await context.bot.send_message(chat_id, "📍 Fetching your saved addresses from Zepto...")
     success, addresses = await loop.run_in_executor(None, zepto.get_saved_addresses)
 
     if not success or not addresses:
         await context.bot.send_message(
             chat_id,
-            "⚠️ No saved addresses found on Zepto.\n\n"
-            "Please open Zepto and select your delivery location, then type `start` again.\n\n"
-            "Or if you've already selected a location on Zepto, type `start` to continue."
+            "⚠️ No delivery address selected on Zepto.\n\n"
+            "Please open the Zepto app/website, select your delivery location, then type `start` again."
         )
         return
 
     context.bot_data["zepto_addresses"] = addresses
-
     keyboard = []
     for a in addresses:
         full = f"{a['label']} — {a['address']}" if a.get("address") else a["label"]

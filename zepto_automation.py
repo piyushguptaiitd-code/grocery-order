@@ -342,6 +342,31 @@ class ZeptoAutomation:
         logger.warning("[Location] Could not open modal via buttons")
         return False
 
+    def get_current_address(self) -> dict | None:
+        """Read the currently selected delivery address from Zepto's header."""
+        try:
+            result = self.driver.execute_script("""
+                // The location button in the header shows current address
+                var btn = Array.from(document.querySelectorAll('button, a, div')).find(function(el) {
+                    var rect = el.getBoundingClientRect();
+                    var text = (el.innerText || '').trim();
+                    // Top of page, has location-like text, not "Login"
+                    return rect.top < 100 && text.length > 2 && text.length < 80
+                           && text.toLowerCase() !== 'login'
+                           && (el.querySelector('svg') || /deliver|location|home|office|flat|road|street|nagar|colony/i.test(text));
+                });
+                return btn ? btn.innerText.trim() : null;
+            """)
+            if result and result.lower() not in ('select location', 'location', ''):
+                label = result.split('\n')[0].strip()
+                logger.info(f"[Address] Current address in header: {repr(result)}")
+                return {"index": 0, "label": label, "address": result}
+            logger.info(f"[Address] No address selected in browser yet (shows: {repr(result)})")
+            return None
+        except Exception as e:
+            logger.warning(f"[Address] Could not read header address: {e}")
+            return None
+
     def get_saved_addresses(self) -> tuple:
         """
         Open Zepto's location modal and scrape saved address cards.
