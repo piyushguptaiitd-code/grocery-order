@@ -116,12 +116,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # If not logged in, trigger Zepto login flow
     if not context.bot_data.get("zepto_logged_in"):
+        if context.bot_data.get("login_in_progress"):
+            await update.message.reply_text("⏳ Login already in progress, please wait...")
+            return
         await update.message.reply_text(
             "👋 *Grocery Group Bot*\n\n"
-            "First, let's connect your Zepto account.\n"
-            f"📲 Sending OTP to {ZEPTO_PHONE}...",
+            "Connecting to Zepto, please wait...",
             parse_mode="Markdown",
         )
+        context.bot_data["login_in_progress"] = True
         await _trigger_zepto_login(chat_id, context)
         return
 
@@ -151,34 +154,17 @@ async def _trigger_zepto_login(chat_id: int, context: ContextTypes.DEFAULT_TYPE)
     loop = asyncio.get_event_loop()
 
     async def do_login():
-        import os
-
-        def _send_screenshots(steps):
-            for label, path in steps:
-                if os.path.exists(path):
-                    try:
-                        asyncio.run_coroutine_threadsafe(
-                            context.bot.send_photo(chat_id, photo=open(path, "rb"), caption=f"🖥 {label}"),
-                            loop
-                        ).result(timeout=10)
-                    except Exception:
-                        pass
-
         # Phase 1: navigate to Zepto and trigger OTP
+        await context.bot.send_message(chat_id, f"📲 Opening Zepto and sending OTP to {ZEPTO_PHONE}...")
         success, msg = await loop.run_in_executor(None, lambda: zepto.initiate_login(ZEPTO_PHONE))
         logger.info(f"[Login] Phase1 result: {msg}")
 
-        _send_screenshots([
-            ("Step 1 — Home", "/tmp/zepto_step1_home.png"),
-            ("Step 2 — Login modal", "/tmp/zepto_step2_modal.png"),
-            ("Step 3 — OTP screen", "/tmp/zepto_step3_otp_screen.png"),
-            ("Error", "/tmp/zepto_login_error.png"),
-        ])
-
-        await context.bot.send_message(chat_id, msg)
-
         if not success:
+            context.bot_data["login_in_progress"] = False
+            await context.bot.send_message(chat_id, msg + "\nSend /start to try again.")
             return
+
+        await context.bot.send_message(chat_id, msg)  # "📩 OTP sent... please reply"
 
         # Phase 2: wait for OTP reply in Telegram
         otp_future = loop.create_future()
@@ -195,21 +181,19 @@ async def _trigger_zepto_login(chat_id: int, context: ContextTypes.DEFAULT_TYPE)
 
         context.bot_data["awaiting_otp"] = False
         context.bot_data.pop("otp_future", None)
+        context.bot_data["login_in_progress"] = False
         await context.bot.send_message(chat_id, "⏳ Entering OTP...")
 
         success, msg = await loop.run_in_executor(None, lambda: zepto.complete_login(otp))
         logger.info(f"[Login] Phase2 result: {msg}")
-
-        _send_screenshots([
-            ("Step 4 — After OTP", "/tmp/zepto_step4_after_otp.png"),
-            ("Error", "/tmp/zepto_login_error.png"),
-        ])
 
         await context.bot.send_message(chat_id, msg)
 
         if success:
             context.bot_data["zepto_logged_in"] = True
             await _prompt_address_selection(chat_id, context)
+        else:
+            await context.bot.send_message(chat_id, "Send /start to try again.")
 
     asyncio.create_task(do_login())
 
@@ -325,7 +309,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Session guard: must be logged in and have address selected
     if not context.bot_data.get("zepto_logged_in"):
-        await update.message.reply_text("Please use /start to connect your Zepto account first.")
+        if context.bot_data.get("login_in_progress"):
+            await update.message.reply_text("⏳ Login in progress, please wait for the OTP prompt before replying.")
+        else:
+            await update.message.reply_text("Please use /start to connect your Zepto account first.")
         return
 
     if not context.bot_data.get("selected_address"):
