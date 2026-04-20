@@ -306,11 +306,28 @@ async def checkout(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def view_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not allowed(update):
         return await reject(update)
-    cart: CartManager = context.bot_data.get("cart")
-    if not cart:
-        await update.message.reply_text("Cart is empty. Type items to start adding!")
+
+    await update.message.reply_text("🛒 Fetching cart from Zepto...")
+
+    loop = asyncio.get_event_loop()
+    items = await loop.run_in_executor(None, zepto.get_browser_cart)
+
+    if not items:
+        await update.message.reply_text("Cart is empty on Zepto.")
         return
-    await update.message.reply_text(cart.format_cart(), parse_mode="Markdown")
+
+    lines = ["*Current Cart (from Zepto):*\n"]
+    total = 0.0
+    for i, item in enumerate(items, 1):
+        price_str = item.get('price', '0').replace(',', '')
+        try:
+            price = float(price_str)
+            total += price
+        except ValueError:
+            price = 0.0
+        lines.append(f"{i}. {item['name']} — ₹{item['price']}")
+    lines.append(f"\n*Total: ₹{total:.0f}*")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):

@@ -680,31 +680,56 @@ class ZeptoAutomation:
             logger.error(f"[Cart] add_to_cart failed: {e}")
             return False
 
-    def view_cart(self) -> List[dict]:
-        """Return current items in the Zepto cart."""
+    def get_browser_cart(self) -> List[dict]:
+        """Scrape current cart items directly from Zepto's browser using JS."""
         try:
-            cart_btn = self.wait.until(
-                EC.element_to_be_clickable((By.XPATH, "//button[contains(@class,'cart') or contains(@aria-label,'cart')]"))
-            )
-            cart_btn.click()
-            time.sleep(2)
-
-            items = []
-            cart_items = self.driver.find_elements(
-                By.XPATH,
-                "//div[contains(@class,'cart-item') or contains(@data-testid,'cart-item')]"
-            )
-            for item in cart_items:
+            # Click cart icon to open cart panel
+            for selector in [
+                (By.XPATH, "//*[@data-testid='cart-icon']"),
+                (By.XPATH, "//*[@data-testid='cart']"),
+                (By.XPATH, "//a[contains(@href,'cart')]"),
+                (By.XPATH, "//*[contains(@aria-label,'cart') or contains(@aria-label,'Cart')]"),
+            ]:
                 try:
-                    name = item.find_element(By.XPATH, ".//*[contains(@class,'name') or contains(@class,'title')]").text
-                    price = item.find_element(By.XPATH, ".//*[contains(@class,'price') or contains(text(),'₹')]").text
-                    items.append({"name": name, "price": price})
-                except Exception:
-                    pass
-            return items
+                    el = WebDriverWait(self.driver, 4).until(EC.element_to_be_clickable(selector))
+                    self.driver.execute_script("arguments[0].click();", el)
+                    time.sleep(2)
+                    break
+                except TimeoutException:
+                    continue
 
+            # Scrape cart items via JS
+            raw = self.driver.execute_script("""
+                var seen = {};
+                var results = [];
+                var candidates = Array.from(document.querySelectorAll('div, li'));
+                candidates.forEach(function(el) {
+                    var text = (el.innerText || '').trim();
+                    var lines = text.split('\\n').map(function(l){ return l.trim(); }).filter(Boolean);
+                    var hasPrice = text.includes('₹');
+                    var hasQty = lines.some(function(l){ return /^\\d+$/.test(l) || /x\\d+/i.test(l); });
+                    var rect = el.getBoundingClientRect();
+                    var isVisible = rect.width > 50 && rect.height > 20 && rect.height < 200;
+                    var childCount = el.children.length;
+                    if (hasPrice && isVisible && childCount >= 2 && childCount <= 15 && lines.length >= 2) {
+                        var priceMatch = text.match(/₹\\s?([\\d,]+)/);
+                        var price = priceMatch ? priceMatch[1] : '';
+                        var name = lines.find(function(l){
+                            return l.length > 5 && !/^₹/.test(l) && !/^\\d+$/.test(l) && !/^(Add|Remove|\\+|-)$/.test(l);
+                        }) || lines[0];
+                        var key = name + price;
+                        if (!seen[key] && name && price) {
+                            seen[key] = true;
+                            results.push({ name: name, price: price });
+                        }
+                    }
+                });
+                return results.slice(0, 20);
+            """)
+            logger.info(f"[BrowserCart] Found {len(raw or [])} items")
+            return raw or []
         except Exception as e:
-            logger.error(f"Failed to view cart: {e}")
+            logger.error(f"[BrowserCart] Failed: {e}")
             return []
 
     def sync_cart_to_zepto(self, cart_items: list) -> int:
