@@ -356,7 +356,15 @@ class ZeptoAutomation:
         """
         try:
             self._open_location_modal()
-            time.sleep(2)
+            time.sleep(4)  # Wait for addresses to load asynchronously
+
+            # Scroll down inside the modal to reveal saved addresses
+            self.driver.execute_script("""
+                var modal = document.querySelector('[role="dialog"],[role="sheet"],[class*="modal"],[class*="drawer"],[class*="bottom-sheet"]');
+                if (modal) modal.scrollTop = 400;
+                else window.scrollBy(0, 400);
+            """)
+            time.sleep(1)
             self.take_screenshot("/tmp/zepto_addresses.png")
 
             addresses = self.driver.execute_script("""
