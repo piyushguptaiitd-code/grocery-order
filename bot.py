@@ -14,7 +14,7 @@ from telegram.ext import (
     ConversationHandler,
 )
 
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_GROUP_ID, ZEPTO_PIN
+from config import TELEGRAM_BOT_TOKEN, TELEGRAM_GROUP_ID, ZEPTO_PIN, ZEPTO_PHONE
 from database import Database
 from cart_manager import CartManager, parse_items
 from address_manager import AddressManager
@@ -66,23 +66,26 @@ async def cart_timeout_handler(context_ref: dict):
     bot = context_ref["bot"]
     chat_id = context_ref["chat_id"]
     cart: CartManager = context_ref["cart"]
+    bot_data = context_ref["bot_data"]
 
     if cart.is_empty():
         return
 
-    addresses = address_mgr.get_all()
-    if not addresses:
-        await bot.send_message(chat_id, "⏰ No new items for 60 seconds!\n\nNo saved addresses found. Use /save_address to add one before ordering.")
+    address = bot_data.get("selected_address")
+    if not address:
+        await bot.send_message(chat_id, "⏰ No new items for 60 seconds!\n\nNo delivery address selected. Use /start to set one.")
         return
 
-    keyboard = [[InlineKeyboardButton(f"{a['label']} — {a['pin_code']}", callback_data=f"addr_{a['address_id']}")] for a in addresses]
-    keyboard.append([InlineKeyboardButton("❌ Keep adding items", callback_data="addr_cancel")])
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
+    keyboard = [
+        [InlineKeyboardButton("✅ Yes, place order", callback_data="order_confirm")],
+        [InlineKeyboardButton("➕ Keep adding items", callback_data="order_cancel")],
+    ]
     await bot.send_message(
         chat_id,
-        f"⏰ No new items for 60 seconds!\n\n{cart.format_cart()}\n\nSelect delivery address to place order:",
-        reply_markup=reply_markup,
+        f"⏰ No new items for 60 seconds!\n\n{cart.format_cart()}\n\n"
+        f"📍 Deliver to: *{address['label']}* — {address['pin_code']}\n\n"
+        f"Place order now?",
+        reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown",
     )
 
@@ -102,12 +105,30 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.bot_data["cart"] = CartManager(
             db,
             on_timeout=lambda: asyncio.create_task(
-                cart_timeout_handler({"bot": context.bot, "chat_id": chat_id, "cart": context.bot_data["cart"]})
+                cart_timeout_handler({"bot": context.bot, "chat_id": chat_id, "cart": context.bot_data["cart"], "bot_data": context.bot_data})
             ),
         )
 
+    # If not logged in, trigger Zepto login flow
+    if not context.bot_data.get("zepto_logged_in"):
+        await update.message.reply_text(
+            "👋 *Grocery Group Bot*\n\n"
+            "First, let's connect your Zepto account.\n"
+            f"📲 Sending OTP to {ZEPTO_PHONE}...",
+            parse_mode="Markdown",
+        )
+        await _trigger_zepto_login(chat_id, context)
+        return
+
+    # If logged in but no address selected, prompt selection
+    if not context.bot_data.get("selected_address"):
+        await _prompt_address_selection(chat_id, context)
+        return
+
+    addr = context.bot_data["selected_address"]
     await update.message.reply_text(
         "👋 *Grocery Group Bot* is ready!\n\n"
+        f"📍 Delivering to: *{addr['label']}* — {addr['pin_code']}\n\n"
         "Just type items to add them to the cart:\n"
         "  • `add milk`\n"
         "  • `add bread, eggs, butter`\n\n"
@@ -116,6 +137,51 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/save_address — save a delivery address\n"
         "/cancel — clear cart and start over\n"
         "/history — view past orders",
+        parse_mode="Markdown",
+    )
+
+
+async def _trigger_zepto_login(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    """Initiate Zepto OTP login and wait for OTP reply in chat."""
+    global _otp_future
+    loop = asyncio.get_event_loop()
+    _otp_future = loop.create_future()
+    context.bot_data["awaiting_otp"] = True
+
+    def otp_callback(ph):
+        future = asyncio.run_coroutine_threadsafe(asyncio.wrap_future(_otp_future), loop)
+        return future.result(timeout=120)
+
+    async def do_login():
+        zepto.start()
+        success = await loop.run_in_executor(None, lambda: zepto.login(ZEPTO_PHONE, otp_callback))
+        context.bot_data["awaiting_otp"] = False
+        if success:
+            context.bot_data["zepto_logged_in"] = True
+            await context.bot.send_message(chat_id, "✅ Logged in to Zepto!")
+            await _prompt_address_selection(chat_id, context)
+        else:
+            await context.bot.send_message(chat_id, "❌ Login failed. Send /start to try again.")
+
+    asyncio.create_task(do_login())
+    await context.bot.send_message(chat_id, "📩 OTP sent! Please reply with the OTP you received.")
+
+
+async def _prompt_address_selection(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    """Show saved addresses for one-time selection at session start."""
+    addresses = address_mgr.get_all()
+    if not addresses:
+        await context.bot.send_message(
+            chat_id,
+            "No saved addresses yet. Use /save_address to add one, then /start again."
+        )
+        return
+
+    keyboard = [[InlineKeyboardButton(f"📍 {a['label']} — {a['pin_code']}", callback_data=f"setup_addr_{a['address_id']}")] for a in addresses]
+    await context.bot.send_message(
+        chat_id,
+        "✅ Zepto connected!\n\n*Select your delivery address for this session:*",
+        reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown",
     )
 
@@ -202,11 +268,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     db.add_user(user.id, user.full_name)
 
+    # Route OTP reply
+    if context.bot_data.get("awaiting_otp"):
+        global _otp_future
+        if _otp_future and not _otp_future.done():
+            _otp_future.set_result(text)
+            await update.message.reply_text("✅ OTP received, logging in...")
+        return
+
+    # Session guard: must be logged in and have address selected
+    if not context.bot_data.get("zepto_logged_in"):
+        await update.message.reply_text("Please use /start to connect your Zepto account first.")
+        return
+
+    if not context.bot_data.get("selected_address"):
+        await _prompt_address_selection(chat_id, context)
+        return
+
     if "cart" not in context.bot_data:
         context.bot_data["cart"] = CartManager(
             db,
             on_timeout=lambda: asyncio.create_task(
-                cart_timeout_handler({"bot": context.bot, "chat_id": chat_id, "cart": context.bot_data["cart"]})
+                cart_timeout_handler({"bot": context.bot, "chat_id": chat_id, "cart": context.bot_data["cart"], "bot_data": context.bot_data})
             ),
         )
 
@@ -376,22 +459,29 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await process_next_item_by_chat(chat_id, context)
 
-    # ── Address selection (after 60s timeout) ──
-    elif data.startswith("addr_"):
-        if data == "addr_cancel":
-            await query.edit_message_text("Ok! Keep adding items. Timer reset.")
-            cart: CartManager = context.bot_data.get("cart")
-            if cart:
-                cart._reset_timer()
-            return
-
-        address_id = int(data.split("_")[1])
+    # ── Address selection at session setup ──
+    elif data.startswith("setup_addr_"):
+        address_id = int(data.split("_")[2])
         address = address_mgr.get(address_id)
         if not address:
             await query.edit_message_text("❌ Address not found.")
             return
+        context.bot_data["selected_address"] = address
+        await query.edit_message_text(
+            f"✅ Delivering to *{address['label']}* — {address['pin_code']}\n\n"
+            "You're all set! Type items to add to cart:\n"
+            "  • `add milk`\n  • `add bread, eggs`",
+            parse_mode="Markdown",
+        )
 
+    # ── Order confirmation (after 60s timeout) ──
+    elif data == "order_confirm":
+        address = context.bot_data.get("selected_address")
         cart: CartManager = context.bot_data.get("cart")
+        if not cart or cart.is_empty():
+            await query.edit_message_text("Cart is empty.")
+            return
+
         total = cart.get_total()
         items = cart.get_items()
         items_json = json.dumps(items)
@@ -401,7 +491,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown",
         )
 
-        # Run checkout in background thread to avoid blocking event loop
         loop = asyncio.get_event_loop()
         order = await loop.run_in_executor(
             None,
@@ -411,8 +500,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         if order:
-            order_id = db.create_order(items_json, address_id, total, order.order_id, "saved_payment")
+            db.create_order(items_json, address["address_id"], total, order.order_id, "saved_payment")
             cart.clear()
+            # Clear selected address so next order starts fresh with address selection
+            context.bot_data.pop("selected_address", None)
             await context.bot.send_message(
                 chat_id,
                 f"🎉 *Order Placed!*\n\n"
@@ -420,18 +511,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Delivery to: *{address['label']}*\n"
                 f"Total: ₹{total:.0f}\n"
                 f"ETA: {order.estimated_delivery}\n\n"
-                f"Cart has been cleared. Start adding items for next order!",
+                f"Cart cleared. Use /start to begin the next order!",
                 parse_mode="Markdown",
             )
         else:
-            await context.bot.send_message(
-                chat_id,
-                "❌ Order failed. Please try placing manually or check Zepto account.",
-            )
+            await context.bot.send_message(chat_id, "❌ Order failed. Please try again or check Zepto account.")
 
-    # ── OTP entry ──
-    elif data.startswith("otp_"):
-        pass  # handled via message
+    elif data == "order_cancel":
+        cart: CartManager = context.bot_data.get("cart")
+        if cart:
+            cart._reset_timer()
+        await query.edit_message_text("Ok! Keep adding items. Timer reset. ⏱")
 
 
 async def handle_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
