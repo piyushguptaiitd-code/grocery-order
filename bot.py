@@ -23,6 +23,11 @@ from zepto_automation import ZeptoAutomation
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
+# Suppress noisy third-party logs
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("telegram").setLevel(logging.WARNING)
+logging.getLogger("telegram.ext").setLevel(logging.INFO)
+
 # Conversation states
 (
     IDLE,
