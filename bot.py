@@ -114,6 +114,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # If not logged in, trigger Zepto login flow
     if not context.bot_data.get("zepto_logged_in"):
+        context.bot_data.pop("phantom_retry_done", None)  # Allow fresh phantom check
         if context.bot_data.get("login_in_progress"):
             await update.message.reply_text("⏳ Login already in progress, please wait...")
             return
@@ -159,34 +160,46 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-async def _trigger_zepto_login(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    """Initiate Zepto OTP login — two phase: send OTP, then wait for reply."""
+async def _trigger_zepto_login(chat_id: int, context: ContextTypes.DEFAULT_TYPE, is_phantom_retry: bool = False):
+    """
+    Check browser UI for Login vs Profile text, then:
+    - Profile visible → skip OTP, proceed to address selection
+    - Login visible → do OTP flow
+    - After OTP + still no address → phantom session → clear and retry once
+    """
     loop = asyncio.get_event_loop()
 
     async def do_login():
-        # Phase 1: check cookies / navigate to Zepto and trigger OTP
         await context.bot.send_message(chat_id, "⏳ Checking Zepto session...")
-        success, msg = await loop.run_in_executor(None, lambda: zepto.initiate_login(ZEPTO_PHONE))
-        logger.info(f"[Login] Phase1 result: {msg}")
+        await loop.run_in_executor(None, zepto.start)
 
-        if not success:
-            context.bot_data["login_in_progress"] = False
-            await context.bot.send_message(chat_id, msg + "\nSend /start to try again.")
-            return
+        if is_phantom_retry:
+            # Clear stale session before re-login
+            await loop.run_in_executor(None, zepto.force_clear_session)
+            await context.bot.send_message(chat_id, "🔄 Stale session cleared — requesting fresh login...")
 
-        # Already logged in via saved cookies — skip OTP entirely
-        if msg.startswith("✅ Already logged in"):
+        state = await loop.run_in_executor(None, zepto.check_login_state)
+        logger.info(f"[Login] Browser state: {state}")
+
+        if state == "logged_in" and not is_phantom_retry:
             context.bot_data["zepto_logged_in"] = True
             context.bot_data["login_in_progress"] = False
-            await context.bot.send_message(chat_id, msg)
+            await context.bot.send_message(chat_id, "✅ Already logged in to Zepto!")
             await _prompt_address_selection(chat_id, context)
             return
 
-        # Need OTP — inform user now that we know OTP was actually sent
+        # Login button visible — need OTP
         await context.bot.send_message(chat_id, f"📲 Sending OTP to {ZEPTO_PHONE}...")
-        await context.bot.send_message(chat_id, msg)  # "📩 OTP sent... please reply"
+        success, msg = await loop.run_in_executor(None, lambda: zepto.initiate_login(ZEPTO_PHONE))
+        logger.info(f"[Login] initiate_login: {msg}")
 
-        # Phase 2: wait for OTP reply in Telegram
+        if not success:
+            context.bot_data["login_in_progress"] = False
+            await context.bot.send_message(chat_id, msg + "\nType `start` to try again.")
+            return
+
+        await context.bot.send_message(chat_id, msg)  # "📩 OTP sent..."
+
         otp_future = loop.create_future()
         context.bot_data["otp_future"] = otp_future
         context.bot_data["awaiting_otp"] = True
@@ -196,7 +209,7 @@ async def _trigger_zepto_login(chat_id: int, context: ContextTypes.DEFAULT_TYPE)
         except asyncio.TimeoutError:
             context.bot_data["awaiting_otp"] = False
             context.bot_data.pop("otp_future", None)
-            await context.bot.send_message(chat_id, "⏰ OTP timed out. Send /start to try again.")
+            await context.bot.send_message(chat_id, "⏰ OTP timed out. Type `start` to try again.")
             return
 
         context.bot_data["awaiting_otp"] = False
@@ -205,24 +218,26 @@ async def _trigger_zepto_login(chat_id: int, context: ContextTypes.DEFAULT_TYPE)
         await context.bot.send_message(chat_id, "⏳ Entering OTP...")
 
         success, msg = await loop.run_in_executor(None, lambda: zepto.complete_login(otp))
-        logger.info(f"[Login] Phase2 result: {msg}")
-
+        logger.info(f"[Login] complete_login: {msg}")
         await context.bot.send_message(chat_id, msg)
 
         if success:
             context.bot_data["zepto_logged_in"] = True
+            context.bot_data.pop("phantom_retry_done", None)
             await _prompt_address_selection(chat_id, context)
         else:
-            await context.bot.send_message(chat_id, "Send /start to try again.")
+            await context.bot.send_message(chat_id, "Type `start` to try again.")
 
     asyncio.create_task(do_login())
 
 
 async def _prompt_address_selection(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    """Use address already selected in browser, or show modal to pick one."""
+    """
+    Read current address from browser header.
+    If no address found after a supposedly valid login → phantom session → force re-login.
+    """
     loop = asyncio.get_event_loop()
 
-    # First: check if browser already has an address selected
     current = await loop.run_in_executor(None, zepto.get_current_address)
     if current:
         context.bot_data["selected_address"] = current
@@ -235,29 +250,24 @@ async def _prompt_address_selection(chat_id: int, context: ContextTypes.DEFAULT_
         await context.bot.send_message(chat_id, msg, parse_mode="Markdown")
         return
 
-    # No address in browser — try the modal
-    await context.bot.send_message(chat_id, "📍 Fetching your saved addresses from Zepto...")
-    success, addresses = await loop.run_in_executor(None, zepto.get_saved_addresses)
-
-    if not success or not addresses:
+    # No address in header. If we just determined we were "logged in" via cookie/profile,
+    # this suggests a phantom (stale) session. Force a fresh OTP login.
+    if context.bot_data.get("zepto_logged_in") and not context.bot_data.get("phantom_retry_done"):
+        context.bot_data["phantom_retry_done"] = True
+        context.bot_data["zepto_logged_in"] = False
+        context.bot_data["login_in_progress"] = True
         await context.bot.send_message(
             chat_id,
-            "⚠️ No delivery address selected on Zepto.\n\n"
-            "Please open the Zepto app/website, select your delivery location, then type `start` again."
+            "⚠️ Session appears stale (logged in but no address). Re-authenticating..."
         )
+        await _trigger_zepto_login(chat_id, context, is_phantom_retry=True)
         return
 
-    context.bot_data["zepto_addresses"] = addresses
-    keyboard = []
-    for a in addresses:
-        full = f"{a['label']} — {a['address']}" if a.get("address") else a["label"]
-        keyboard.append([InlineKeyboardButton(f"📍 {full}", callback_data=f"setup_addr_{a['index']}")])
-
+    # After phantom retry or still nothing — guide user to select address on Zepto
     await context.bot.send_message(
         chat_id,
-        "✅ Zepto connected!\n\n*Select your delivery address:*",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown",
+        "⚠️ No delivery address selected on Zepto.\n\n"
+        "Please open the Zepto app/website, select your delivery location, then type `start` again."
     )
 
 

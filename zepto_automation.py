@@ -92,41 +92,66 @@ class ZeptoAutomation:
         except Exception as e:
             logger.error(f"[Cookies] Failed to load: {e}")
 
-    def _check_session_valid(self) -> bool:
-        """Check if logged in by looking for a Login button — if present, not logged in."""
+    def check_login_state(self) -> str:
+        """
+        Navigate to Zepto and determine login state from browser UI.
+        Looks for Login button (→ logged_out) or profile/account element (→ logged_in).
+        Returns 'logged_in' or 'logged_out'.
+        """
         try:
             self.driver.get(ZEPTO_BASE_URL)
             time.sleep(3)
             result = self.driver.execute_script("""
-                var allText = document.body.innerText || '';
+                // Login button present → not logged in
                 var loginBtn = Array.from(document.querySelectorAll('button, a')).find(function(el) {
                     var t = (el.innerText || el.textContent || '').trim().toLowerCase();
                     return t === 'login' || t === 'sign in' || t === 'log in';
                 });
-                return {
-                    hasLoginBtn: !!loginBtn,
-                    loginBtnText: loginBtn ? loginBtn.innerText : null,
-                    url: window.location.href
-                };
+                if (loginBtn) return 'logged_out';
+
+                // Profile/account icon in header → logged in
+                var w = window.innerWidth;
+                var profileEl = Array.from(document.querySelectorAll(
+                    '[data-testid*="profile"], [data-testid*="account"], [data-testid*="user"], ' +
+                    '[aria-label*="profile"], [aria-label*="account"], [aria-label*="user"], ' +
+                    '[href*="/profile"], [href*="/account"]'
+                )).find(function(el) {
+                    var rect = el.getBoundingClientRect();
+                    return rect.top < 100;
+                });
+                if (profileEl) return 'logged_in';
+
+                // "Hi, Name" greeting anywhere near top of page
+                var greeting = Array.from(document.querySelectorAll('span, p, div, button')).find(function(el) {
+                    var t = (el.innerText || '').trim();
+                    var rect = el.getBoundingClientRect();
+                    return rect.top < 100 && /^hi[,\s]/i.test(t);
+                });
+                if (greeting) return 'logged_in';
+
+                // No Login button found — assume logged in
+                return 'logged_in';
             """)
-            logger.info(f"[Login] Session check: {result}")
-            is_logged = not result.get('hasLoginBtn', True)
-            logger.info(f"[Login] Session valid: {is_logged}")
-            return is_logged
+            logger.info(f"[Login] Browser state: {result}")
+            return result or 'logged_out'
         except Exception as e:
-            logger.warning(f"[Login] Could not check session: {e}")
-            return False
+            logger.warning(f"[Login] check_login_state failed: {e}")
+            return 'logged_out'
+
+    def force_clear_session(self):
+        """Clear all browser session data so a fresh OTP login can be performed."""
+        try:
+            self.driver.delete_all_cookies()
+            self.driver.execute_script("try { localStorage.clear(); } catch(e) {} try { sessionStorage.clear(); } catch(e) {}")
+            logger.info("[Login] Cleared browser session/cookies for re-login")
+        except Exception as e:
+            logger.warning(f"[Login] force_clear_session failed: {e}")
 
     def start(self):
         if not self.driver:
             self.driver = self._build_driver()
             self.wait = WebDriverWait(self.driver, SELENIUM_TIMEOUT)
             logger.info("Selenium driver started")
-            if self._check_session_valid():
-                self.is_logged_in = True
-                logger.info("[Login] Restored session from saved cookies")
-            else:
-                logger.info("[Login] Cookies expired or invalid, will need to re-login")
 
     def stop(self):
         if self.driver:
@@ -142,10 +167,6 @@ class ZeptoAutomation:
         """
         try:
             self.start()
-            # If cookies restored a valid session, verify by checking for saved addresses
-            if self.is_logged_in:
-                logger.info("[Login P1] Session restored from cookies — skipping OTP")
-                return True, "✅ Already logged in (session restored from cookies)!"
             self.driver.get(ZEPTO_BASE_URL)
             time.sleep(3)
             self.take_screenshot("/tmp/zepto_step1_home.png")
