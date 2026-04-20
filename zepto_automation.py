@@ -40,6 +40,7 @@ class ZeptoAutomation:
         self.driver: Optional[webdriver.Chrome] = None
         self.wait: Optional[WebDriverWait] = None
         self.is_logged_in = False
+        self._location_set = False
 
     def _build_driver(self) -> webdriver.Chrome:
         options = Options()
@@ -123,24 +124,49 @@ class ZeptoAutomation:
     def set_delivery_location(self, pin_code: str) -> bool:
         """Set delivery location by pin code."""
         try:
-            location_btn = self.wait.until(
-                EC.element_to_be_clickable((By.XPATH, "//button[contains(@class,'location') or contains(text(),'location') or contains(text(),'Deliver')]"))
-            )
-            location_btn.click()
-            time.sleep(1)
+            self.driver.get(ZEPTO_BASE_URL)
+            time.sleep(3)
+
+            # Try clicking the location/delivery area button
+            for selector in [
+                "//button[contains(text(),'Deliver') or contains(text(),'Location') or contains(text(),'Enter')]",
+                "//div[contains(text(),'Deliver') or contains(text(),'Location')]",
+                "//input[contains(@placeholder,'pincode') or contains(@placeholder,'PIN') or contains(@placeholder,'location') or contains(@placeholder,'area')]",
+            ]:
+                try:
+                    el = self.driver.find_element(By.XPATH, selector)
+                    el.click()
+                    time.sleep(1)
+                    break
+                except NoSuchElementException:
+                    continue
 
             pin_input = self.wait.until(
-                EC.presence_of_element_located((By.XPATH, "//input[contains(@placeholder,'pincode') or contains(@placeholder,'PIN') or contains(@placeholder,'location')]"))
+                EC.presence_of_element_located((By.XPATH,
+                    "//input[contains(@placeholder,'pincode') or contains(@placeholder,'PIN') or contains(@placeholder,'location') or contains(@placeholder,'area') or contains(@placeholder,'Enter')]"
+                ))
             )
             pin_input.clear()
             pin_input.send_keys(pin_code)
             time.sleep(2)
 
-            # Select first result
-            first_result = self.wait.until(
-                EC.element_to_be_clickable((By.XPATH, "(//ul[contains(@class,'suggestion') or contains(@class,'result')]//li)[1]"))
-            )
-            first_result.click()
+            # Select first autocomplete result
+            for selector in [
+                "(//ul//li)[1]",
+                "(//div[@role='option'])[1]",
+                "(//div[contains(@class,'suggestion')])[1]",
+                "(//div[contains(@class,'result')])[1]",
+            ]:
+                try:
+                    first_result = self.driver.find_element(By.XPATH, selector)
+                    first_result.click()
+                    time.sleep(2)
+                    logger.info(f"Delivery location set to pin code: {pin_code}")
+                    return True
+                except NoSuchElementException:
+                    continue
+
+            pin_input.send_keys(Keys.RETURN)
             time.sleep(2)
             return True
 
@@ -148,55 +174,78 @@ class ZeptoAutomation:
             logger.error(f"Failed to set delivery location: {e}")
             return False
 
+    def _dismiss_popups(self):
+        """Dismiss any overlays or popups that might block interaction."""
+        for selector in [
+            "//button[contains(text(),'Allow') or contains(text(),'OK') or contains(text(),'Got it') or contains(text(),'Close') or contains(text(),'×')]",
+            "//div[@role='dialog']//button",
+        ]:
+            try:
+                btn = self.driver.find_element(By.XPATH, selector)
+                btn.click()
+                time.sleep(0.5)
+            except NoSuchElementException:
+                pass
+
     def search_products(self, query: str) -> List[ZeptoProduct]:
-        """Search for products and return top results."""
+        """Search for products using JS-based extraction (resilient to dynamic class names)."""
         try:
             self.driver.get(f"{ZEPTO_BASE_URL}/search?query={query.replace(' ', '+')}")
-            time.sleep(3)
+            time.sleep(5)
+
+            self._dismiss_popups()
+
+            logger.info(f"Search page title: {self.driver.title} | URL: {self.driver.current_url}")
+
+            # JavaScript-based extraction: find cards containing price + add button
+            raw = self.driver.execute_script("""
+                var candidates = Array.from(document.querySelectorAll('div, article, section, li'));
+                var cards = candidates.filter(function(el) {
+                    var text = el.innerText || '';
+                    var hasPrice = text.includes('₹');
+                    var hasAdd = el.querySelector('button') !== null;
+                    var rect = el.getBoundingClientRect();
+                    var isVisible = rect.width > 50 && rect.height > 50;
+                    var notTooLarge = rect.width < 600;
+                    var childCount = el.children.length;
+                    return hasPrice && hasAdd && isVisible && notTooLarge && childCount >= 2 && childCount <= 20;
+                });
+                // Deduplicate by bounding box top position
+                var seen = {};
+                var unique = [];
+                cards.forEach(function(el) {
+                    var rect = el.getBoundingClientRect();
+                    var key = Math.round(rect.top / 10) + '_' + Math.round(rect.left / 10);
+                    if (!seen[key]) {
+                        seen[key] = true;
+                        unique.push(el);
+                    }
+                });
+                return unique.slice(0, 5).map(function(el) {
+                    var text = el.innerText || '';
+                    var lines = text.split('\\n').map(function(l) { return l.trim(); }).filter(Boolean);
+                    var name = lines[0] || '';
+                    var priceMatch = text.match(/₹\\s?([\\d,]+)/);
+                    var price = priceMatch ? parseFloat(priceMatch[1].replace(',','')) : 0;
+                    var qtyLine = lines.find(function(l) { return /\\d+\\s*(g|kg|ml|L|pc|pack)/i.test(l); }) || '';
+                    var img = el.querySelector('img');
+                    var imgSrc = img ? (img.src || img.getAttribute('data-src') || '') : '';
+                    var outOfStock = text.includes('Out of Stock') || text.includes('Notify Me') || text.includes('Unavailable');
+                    return { name: name, price: price, qty: qtyLine, img: imgSrc, outOfStock: outOfStock };
+                });
+            """)
 
             products = []
-
-            # Try to find product cards
-            product_cards = self.driver.find_elements(
-                By.XPATH,
-                "//div[contains(@class,'product-card') or contains(@data-testid,'product')]"
-            )[:ZEPTO_SEARCH_LIMIT]
-
-            for i, card in enumerate(product_cards):
-                try:
-                    name = card.find_element(By.XPATH, ".//p[contains(@class,'name') or contains(@class,'title')] | .//h3 | .//span[contains(@class,'name')]").text.strip()
-                    price_text = card.find_element(By.XPATH, ".//*[contains(@class,'price') or contains(text(),'₹')]").text.strip()
-                    price = float(''.join(filter(lambda c: c.isdigit() or c == '.', price_text.replace(',', ''))) or 0)
-                    qty_unit = ""
-                    try:
-                        qty_unit = card.find_element(By.XPATH, ".//*[contains(@class,'quantity') or contains(@class,'unit') or contains(@class,'weight')]").text.strip()
-                    except NoSuchElementException:
-                        pass
-
-                    img_url = ""
-                    try:
-                        img = card.find_element(By.TAG_NAME, "img")
-                        img_url = img.get_attribute("src") or ""
-                    except NoSuchElementException:
-                        pass
-
-                    in_stock = True
-                    try:
-                        card.find_element(By.XPATH, ".//*[contains(text(),'Out of Stock') or contains(text(),'Unavailable')]")
-                        in_stock = False
-                    except NoSuchElementException:
-                        pass
-
+            for i, p in enumerate(raw or []):
+                if p.get('name') and p.get('price', 0) > 0:
                     products.append(ZeptoProduct(
                         product_id=f"zepto_{i}_{query[:10].replace(' ', '_')}",
-                        name=name,
-                        price=price,
-                        quantity_unit=qty_unit,
-                        image_url=img_url,
-                        in_stock=in_stock,
+                        name=p['name'],
+                        price=p['price'],
+                        quantity_unit=p.get('qty', ''),
+                        image_url=p.get('img', ''),
+                        in_stock=not p.get('outOfStock', False),
                     ))
-                except Exception as e:
-                    logger.warning(f"Failed to parse product card {i}: {e}")
 
             logger.info(f"Found {len(products)} products for '{query}'")
             return products

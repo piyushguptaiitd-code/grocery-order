@@ -10,6 +10,7 @@ TELEGRAM_GROUP_ID = int(os.getenv('TELEGRAM_GROUP_ID', 0))
 # Zepto Account Credentials (encrypted in database)
 ZEPTO_EMAIL = os.getenv('ZEPTO_EMAIL')
 ZEPTO_PASSWORD = os.getenv('ZEPTO_PASSWORD')
+ZEPTO_PIN = os.getenv('ZEPTO_PIN', '')
 
 # Database
 DATABASE_PATH = os.getenv('DATABASE_PATH', 'grocery_bot.db')

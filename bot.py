@@ -14,7 +14,7 @@ from telegram.ext import (
     ConversationHandler,
 )
 
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_GROUP_ID
+from config import TELEGRAM_BOT_TOKEN, TELEGRAM_GROUP_ID, ZEPTO_PIN
 from database import Database
 from cart_manager import CartManager, parse_items
 from address_manager import AddressManager
@@ -245,6 +245,10 @@ async def process_next_item(update_or_query, context: ContextTypes.DEFAULT_TYPE)
     await context.bot.send_message(chat_id, f"🔍 Searching Zepto for *{item}*...", parse_mode="Markdown")
 
     zepto.start()
+    if ZEPTO_PIN and not zepto._location_set:
+        await context.bot.send_message(chat_id, "📍 Setting delivery location...")
+        await asyncio.get_event_loop().run_in_executor(None, lambda: zepto.set_delivery_location(ZEPTO_PIN))
+        zepto._location_set = True
     products = zepto.search_products(item)
 
     if not products:
