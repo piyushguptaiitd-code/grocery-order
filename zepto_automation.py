@@ -630,8 +630,8 @@ class ZeptoAutomation:
             logger.error(f"Failed to view cart: {e}")
             return []
 
-    def select_address_and_checkout(self, address_label: str, full_address: str, pin_code: str) -> Optional[ZeptoOrder]:
-        """Proceed to checkout, select/set address, and confirm payment."""
+    def select_address_and_checkout(self) -> Optional[ZeptoOrder]:
+        """Proceed to checkout and confirm payment. Address should already be selected."""
         try:
             # Go to checkout
             checkout_btn = self.wait.until(
@@ -640,37 +640,19 @@ class ZeptoAutomation:
             checkout_btn.click()
             time.sleep(3)
 
-            # Try selecting saved address matching label or pin
+            # If address selection/confirmation modal appears, just proceed (address already selected upfront)
+            # Try clicking any "Confirm" or "Continue" button for address confirmation
             try:
-                saved_addr = self.driver.find_element(
+                confirm_addr_btn = self.driver.find_element(
                     By.XPATH,
-                    f"//div[contains(text(),'{address_label}') or contains(text(),'{pin_code}')]"
+                    "//button[contains(text(),'Confirm') or contains(text(),'Continue') or contains(text(),'Proceed')]"
                 )
-                saved_addr.click()
-                logger.info(f"Selected saved address: {address_label}")
+                confirm_addr_btn.click()
+                time.sleep(2)
+                logger.info("Confirmed pre-selected address at checkout")
             except NoSuchElementException:
-                # Add new address
-                add_addr_btn = self.driver.find_element(
-                    By.XPATH,
-                    "//button[contains(text(),'Add') and contains(text(),'address') or contains(@class,'add-address')]"
-                )
-                add_addr_btn.click()
-                time.sleep(1)
-
-                addr_input = self.wait.until(
-                    EC.presence_of_element_located((By.XPATH, "//input[contains(@placeholder,'address') or contains(@placeholder,'street')]"))
-                )
-                addr_input.send_keys(full_address)
-                time.sleep(1)
-
-                pin_input = self.driver.find_element(By.XPATH, "//input[contains(@placeholder,'PIN') or contains(@placeholder,'pincode')]")
-                pin_input.clear()
-                pin_input.send_keys(pin_code)
-                time.sleep(2)
-
-                save_btn = self.driver.find_element(By.XPATH, "//button[contains(text(),'Save') or contains(text(),'Confirm')]")
-                save_btn.click()
-                time.sleep(2)
+                # No confirmation step — address already confirmed
+                logger.info("No address confirmation needed — proceeding to payment")
 
             # Proceed to payment
             pay_btn = self.wait.until(
