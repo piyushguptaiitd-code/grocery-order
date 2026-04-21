@@ -851,10 +851,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _finish_order(chat_id, context, order)
 
     elif data == "order_cancel":
-        cart: CartManager = context.bot_data.get("cart")
-        if cart:
-            cart._reset_timer()
-        await query.edit_message_text("Ok! Keep adding items. Timer reset. ⏱")
+        await query.edit_message_text("Ok! Keep adding items and type `checkout` when ready.")
 
 
 async def _finish_order(chat_id: int, context: ContextTypes.DEFAULT_TYPE, order):
