@@ -312,17 +312,17 @@ class ZeptoAutomation:
 
             time.sleep(3)
             self.take_screenshot("/tmp/zepto_step4_after_otp.png")
-
-            # Debug: log all input fields on page
-            all_inputs = self.driver.find_elements(By.TAG_NAME, "input")
-            logger.info(f"[Login P2] Found {len(all_inputs)} input fields on page")
-            for i, inp in enumerate(all_inputs[:5]):  # Log first 5
-                logger.info(f"  Input {i}: type={inp.get_attribute('type')}, placeholder={inp.get_attribute('placeholder')}, maxlength={inp.get_attribute('maxlength')}, visible={inp.is_displayed()}")
-
             logger.info(f"[Login P2] After OTP url={self.driver.current_url}")
 
-            self.is_logged_in = True
-            return True, "✅ Logged in to Zepto!"
+            # Verify login actually succeeded by checking browser state
+            state = self.check_login_state()
+            if state == "logged_in":
+                self.is_logged_in = True
+                return True, "✅ Logged in to Zepto!"
+            else:
+                logger.error("[Login P2] OTP accepted but still showing Login button — OTP may be wrong")
+                self.take_screenshot("/tmp/zepto_step4_otp_failed.png")
+                return False, "❌ OTP incorrect or expired. Please try again."
 
         except Exception as e:
             logger.error(f"[Login P2] Exception: {e}")
@@ -939,23 +939,32 @@ class ZeptoAutomation:
         """Click the floating cart button or cart icon, then proceed to checkout."""
         try:
             self.take_screenshot("/tmp/zepto_checkout_step1_before.png")
-            logger.info(f"[Checkout] Current page: {self.driver.current_url}")
+            current_url = self.driver.current_url
+            logger.info(f"[Checkout] Current page: {current_url}")
+
+            # If already on the cart/checkout page, skip clicking the pill —
+            # it doesn't exist there. Go straight to the Proceed button.
+            already_on_cart = any(k in current_url for k in ('cart', 'checkout', 'payment'))
+            cart_clicked = already_on_cart
+            if already_on_cart:
+                logger.info("[Checkout] Already on cart/checkout page — skipping pill click")
 
             # Try JS first: find the bottom floating "Cart N item(s)" pill button
-            cart_clicked = self.driver.execute_script("""
-                var btn = Array.from(document.querySelectorAll('button, a, div')).find(function(el) {
-                    var t = (el.innerText || '').trim().toLowerCase();
-                    var rect = el.getBoundingClientRect();
-                    var isBottom = rect.bottom > window.innerHeight * 0.7;
-                    var isCartPill = /^cart/.test(t) && /item/.test(t);
-                    return isBottom && isCartPill && rect.width > 80;
-                });
-                if (btn) { btn.click(); return true; }
-                return false;
-            """)
-            if cart_clicked:
-                logger.info("[Checkout] Clicked bottom floating cart pill via JS")
-                time.sleep(2)
+            if not cart_clicked:
+                cart_clicked = self.driver.execute_script("""
+                    var btn = Array.from(document.querySelectorAll('button, a, div')).find(function(el) {
+                        var t = (el.innerText || '').trim().toLowerCase();
+                        var rect = el.getBoundingClientRect();
+                        var isBottom = rect.bottom > window.innerHeight * 0.7;
+                        var isCartPill = /^cart/.test(t) && /item/.test(t);
+                        return isBottom && isCartPill && rect.width > 80;
+                    });
+                    if (btn) { btn.click(); return true; }
+                    return false;
+                """)
+                if cart_clicked:
+                    logger.info("[Checkout] Clicked bottom floating cart pill via JS")
+                    time.sleep(2)
 
             # Fallback: top-right cart icon selectors
             if not cart_clicked:
