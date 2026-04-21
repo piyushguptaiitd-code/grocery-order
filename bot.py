@@ -722,12 +722,23 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         loop = asyncio.get_event_loop()
         ok = await loop.run_in_executor(None, lambda: zepto.select_zepto_address(address["label"]))
+        logger.info(f"[Address] select_zepto_address('{address['label']}') returned: {ok}")
 
         if not ok:
-            await context.bot.send_message(
-                chat_id,
-                f"⚠️ Could not confirm address on Zepto. Will retry at checkout.",
-            )
+            # Modal may still be showing — check for it again and show re-picker
+            modal_addrs = await loop.run_in_executor(None, zepto.get_address_modal_addresses)
+            if modal_addrs:
+                context.bot_data["zepto_addresses"] = modal_addrs
+                keyboard = [[InlineKeyboardButton(f"📍 {a['label']}", callback_data=f"setup_addr_{a['index']}")]
+                            for a in modal_addrs]
+                await context.bot.send_message(
+                    chat_id,
+                    f"⚠️ Could not click *{address['label']}* on Zepto. Please try again:",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode="Markdown",
+                )
+                return
+            await context.bot.send_message(chat_id, f"⚠️ Could not confirm address on Zepto. Will retry at checkout.")
 
         # Show existing cart or ready message
         cart: CartManager = context.bot_data.get("cart")

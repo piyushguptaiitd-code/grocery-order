@@ -426,7 +426,8 @@ class ZeptoAutomation:
                     var lines = text.split('\\n').map(function(l) { return l.trim(); }).filter(Boolean);
                     if (lines.length < 2) return;
 
-                    var label = lines[0];
+                    // Strip distance indicator e.g. "Home • 1132.6 km" → "Home"
+                    var label = lines[0].replace(/\\s*•.*$/, '').trim();
                     var addr = lines.slice(1).join(', ');
 
                     // Label: short (2-25 chars), not a generic heading
@@ -470,9 +471,10 @@ class ZeptoAutomation:
                                 continue
                             text = el.text.strip()
                             lines = [l.strip() for l in text.split('\n') if l.strip()]
-                            if len(lines) >= 2 and 2 <= len(lines[0]) <= 25 and lines[0] not in seen:
-                                seen.add(lines[0])
-                                addresses.append({"label": lines[0], "address": ', '.join(lines[1:])})
+                            clean_label = lines[0].replace('•', '').split('  ')[0].strip()
+                            if len(lines) >= 2 and 2 <= len(clean_label) <= 25 and clean_label not in seen:
+                                seen.add(clean_label)
+                                addresses.append({"label": clean_label, "address": ', '.join(lines[1:])})
                         except Exception:
                             continue
                 except Exception as e:
@@ -488,27 +490,75 @@ class ZeptoAutomation:
             return False, []
 
     def select_zepto_address(self, label: str) -> bool:
-        """Click the saved address with the given label in the location modal."""
+        """Click the saved address card with the given label in the location modal."""
         try:
-            # Modal should still be open; if not, re-open it
+            self.take_screenshot("/tmp/zepto_addr_before_click.png")
+            logger.info(f"[Addresses] Attempting to click address: {label}")
+
+            # JS approach: find any visible element whose text starts with the label,
+            # then walk up to the nearest clickable ancestor (a, button, or li/div with onclick)
+            clicked = self.driver.execute_script("""
+                var label = arguments[0];
+                // Find all text-containing elements whose first line matches label
+                var all = Array.from(document.querySelectorAll('*'));
+                var match = null;
+                for (var i = 0; i < all.length; i++) {
+                    var el = all[i];
+                    var text = (el.innerText || '').trim();
+                    var firstLine = text.split('\\n')[0].replace(/\\s*•.*$/, '').trim();
+                    var rect = el.getBoundingClientRect();
+                    if (firstLine === label && rect.width > 50 && rect.height > 10) {
+                        match = el;
+                        break;
+                    }
+                }
+                if (!match) return 'not_found';
+
+                // Walk up to the clickable card wrapper
+                var target = match;
+                for (var p = match; p && p !== document.body; p = p.parentElement) {
+                    var tag = (p.tagName || '').toLowerCase();
+                    var rect = p.getBoundingClientRect();
+                    if ((tag === 'a' || tag === 'button' || tag === 'li') && rect.width > 100) {
+                        target = p;
+                        break;
+                    }
+                    // Also accept divs that look like cards (reasonably tall, wide)
+                    if (tag === 'div' && rect.width > 150 && rect.height > 40 && rect.height < 200) {
+                        target = p;
+                        break;
+                    }
+                }
+                try {
+                    target.click();
+                    return 'clicked';
+                } catch(e) {
+                    return 'click_failed:' + e.message;
+                }
+            """, label)
+
+            logger.info(f"[Addresses] select_zepto_address JS result: {clicked}")
+            time.sleep(2)
+            self.take_screenshot("/tmp/zepto_addr_selected.png")
+
+            if clicked == 'clicked':
+                return True
+
+            # JS didn't find it — try XPath as fallback
             for xpath in [
-                f"//*[normalize-space(text())='{label}']",
+                f"//*[normalize-space(translate(text(),'•0123456789abcdefghijklmnopqrstuvwxyz ',''))='{label}']",
                 f"//*[contains(text(),'{label}')]",
             ]:
                 try:
                     el = self.driver.find_element(By.XPATH, xpath)
-                    # Click the card (may need to go up to the clickable parent)
-                    try:
-                        el.click()
-                    except Exception:
-                        self.driver.execute_script("arguments[0].click();", el)
+                    self.driver.execute_script("arguments[0].click();", el)
                     time.sleep(2)
-                    logger.info(f"[Addresses] Clicked address: {label}")
-                    self.take_screenshot("/tmp/zepto_addr_selected.png")
+                    logger.info(f"[Addresses] XPath fallback clicked: {label}")
                     return True
                 except NoSuchElementException:
                     continue
-            logger.error(f"[Addresses] Could not find address with label: {label}")
+
+            logger.error(f"[Addresses] Could not find/click address: {label} (JS: {clicked})")
             return False
         except Exception as e:
             logger.error(f"[Addresses] select_zepto_address failed: {e}")
