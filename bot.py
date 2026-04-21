@@ -564,47 +564,49 @@ async def process_next_item(update_or_query, context: ContextTypes.DEFAULT_TYPE)
     await context.bot.send_message(chat_id, f"🔍 Searching Zepto for *{item}*...", parse_mode="Markdown")
 
     loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, zepto.start)
-    if ZEPTO_PIN and not zepto._location_set:
-        await context.bot.send_message(chat_id, "📍 Setting delivery location...")
-        await loop.run_in_executor(None, lambda: zepto.set_delivery_location(ZEPTO_PIN))
-        zepto._location_set = True
-    products = await loop.run_in_executor(None, lambda: zepto.search_products(item))
-
-    if not products:
-        await context.bot.send_message(chat_id, f"❌ No results found for '{item}'. Skipping.")
-        await process_next_item_by_chat(chat_id, context)
-        return
-
-    context.bot_data["search_results"] = products
-
-    # Build inline keyboard with results
-    keyboard = []
-    for i, p in enumerate(products):
-        stock_icon = "✅" if p.in_stock else "❌"
-        label = f"{stock_icon} {p.name[:35]} — ₹{p.price:.0f} {p.quantity_unit}"
-        keyboard.append([InlineKeyboardButton(label, callback_data=f"pick_{i}")])
-    keyboard.append([InlineKeyboardButton("⏭ Skip this item", callback_data="pick_skip")])
-
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    # Send screenshot for visual confirmation
     try:
-        screenshot_path = zepto.take_screenshot()
-        await context.bot.send_photo(
-            chat_id,
-            photo=open(screenshot_path, "rb"),
-            caption=f"Results for *{item}* — pick one:",
-            reply_markup=reply_markup,
-            parse_mode="Markdown",
-        )
-    except Exception:
-        await context.bot.send_message(
-            chat_id,
-            f"Results for *{item}* — pick one:",
-            reply_markup=reply_markup,
-            parse_mode="Markdown",
-        )
+        await loop.run_in_executor(None, zepto.start)
+        if ZEPTO_PIN and not zepto._location_set:
+            await context.bot.send_message(chat_id, "📍 Setting delivery location...")
+            await loop.run_in_executor(None, lambda: zepto.set_delivery_location(ZEPTO_PIN))
+            zepto._location_set = True
+        products = await loop.run_in_executor(None, lambda: zepto.search_products(item))
+
+        if not products:
+            await context.bot.send_message(chat_id, f"❌ No results found for '{item}'. Skipping.")
+            await process_next_item_by_chat(chat_id, context)
+            return
+
+        context.bot_data["search_results"] = products
+
+        keyboard = []
+        for i, p in enumerate(products):
+            stock_icon = "✅" if p.in_stock else "❌"
+            label = f"{stock_icon} {p.name[:35]} — ₹{p.price:.0f} {p.quantity_unit}"
+            keyboard.append([InlineKeyboardButton(label, callback_data=f"pick_{i}")])
+        keyboard.append([InlineKeyboardButton("⏭ Skip this item", callback_data="pick_skip")])
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        try:
+            screenshot_path = zepto.take_screenshot()
+            await context.bot.send_photo(
+                chat_id,
+                photo=open(screenshot_path, "rb"),
+                caption=f"Results for *{item}* — pick one:",
+                reply_markup=reply_markup,
+                parse_mode="Markdown",
+            )
+        except Exception:
+            await context.bot.send_message(
+                chat_id,
+                f"Results for *{item}* — pick one:",
+                reply_markup=reply_markup,
+                parse_mode="Markdown",
+            )
+    except Exception as e:
+        logger.error(f"[Search] process_next_item failed for '{item}': {e}")
+        context.bot_data["searching"] = False
+        await context.bot.send_message(chat_id, f"❌ Error searching for '{item}'. Try again.")
 
 
 async def process_next_item_by_chat(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
@@ -620,38 +622,43 @@ async def process_next_item_by_chat(chat_id: int, context: ContextTypes.DEFAULT_
     await context.bot.send_message(chat_id, f"🔍 Searching Zepto for *{item}*...", parse_mode="Markdown")
 
     loop = asyncio.get_event_loop()
-    products = await loop.run_in_executor(None, lambda: zepto.search_products(item))
-    context.bot_data["search_results"] = products
-
-    if not products:
-        await context.bot.send_message(chat_id, f"❌ No results for '{item}'. Skipping.")
-        await process_next_item_by_chat(chat_id, context)
-        return
-
-    keyboard = []
-    for i, p in enumerate(products):
-        stock_icon = "✅" if p.in_stock else "❌"
-        label = f"{stock_icon} {p.name[:35]} — ₹{p.price:.0f} {p.quantity_unit}"
-        keyboard.append([InlineKeyboardButton(label, callback_data=f"pick_{i}")])
-    keyboard.append([InlineKeyboardButton("⏭ Skip this item", callback_data="pick_skip")])
-
-    reply_markup = InlineKeyboardMarkup(keyboard)
     try:
-        screenshot_path = zepto.take_screenshot()
-        await context.bot.send_photo(
-            chat_id,
-            photo=open(screenshot_path, "rb"),
-            caption=f"Results for *{item}* — pick one:",
-            reply_markup=reply_markup,
-            parse_mode="Markdown",
-        )
-    except Exception:
-        await context.bot.send_message(
-            chat_id,
-            f"Results for *{item}* — pick one:",
-            reply_markup=reply_markup,
-            parse_mode="Markdown",
-        )
+        products = await loop.run_in_executor(None, lambda: zepto.search_products(item))
+        context.bot_data["search_results"] = products
+
+        if not products:
+            await context.bot.send_message(chat_id, f"❌ No results for '{item}'. Skipping.")
+            await process_next_item_by_chat(chat_id, context)
+            return
+
+        keyboard = []
+        for i, p in enumerate(products):
+            stock_icon = "✅" if p.in_stock else "❌"
+            label = f"{stock_icon} {p.name[:35]} — ₹{p.price:.0f} {p.quantity_unit}"
+            keyboard.append([InlineKeyboardButton(label, callback_data=f"pick_{i}")])
+        keyboard.append([InlineKeyboardButton("⏭ Skip this item", callback_data="pick_skip")])
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        try:
+            screenshot_path = zepto.take_screenshot()
+            await context.bot.send_photo(
+                chat_id,
+                photo=open(screenshot_path, "rb"),
+                caption=f"Results for *{item}* — pick one:",
+                reply_markup=reply_markup,
+                parse_mode="Markdown",
+            )
+        except Exception:
+            await context.bot.send_message(
+                chat_id,
+                f"Results for *{item}* — pick one:",
+                reply_markup=reply_markup,
+                parse_mode="Markdown",
+            )
+    except Exception as e:
+        logger.error(f"[Search] process_next_item_by_chat failed for '{item}': {e}")
+        context.bot_data["searching"] = False
+        await context.bot.send_message(chat_id, f"❌ Error searching for '{item}'. Try again.")
 
 
 # ─── Callback Query Handler ─────────────────────────────────────────────────────
@@ -866,7 +873,6 @@ async def _finish_order(chat_id: int, context: ContextTypes.DEFAULT_TYPE, order)
         db.create_order(items_json, 0, total, order.order_id, "saved_payment")
         if cart:
             cart.clear()
-        context.bot_data.pop("selected_address", None)
         await context.bot.send_message(
             chat_id,
             f"🎉 *Order Placed!*\n\n"
