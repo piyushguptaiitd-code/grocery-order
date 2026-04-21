@@ -430,10 +430,11 @@ class ZeptoAutomation:
                     var label = lines[0].replace(/\\s*•.*$/, '').trim();
                     var addr = lines.slice(1).join(', ');
 
-                    // Label: short (2-25 chars), not a generic heading
+                    // Label: short (2-25 chars), not a generic UI heading
                     var labelOk = label.length >= 2 && label.length <= 25;
-                    var notHeading = !/^(saved|your|home|select|add new|addresses|location|deliver)/i.test(label) ||
-                                     label.length <= 15;
+                    var HEADINGS = ['saved addresses','your location','select location',
+                                    'add new address','add address','deliver to','addresses','location'];
+                    var notHeading = !HEADINGS.some(function(h){ return label.toLowerCase() === h; });
                     // Address: reasonably long
                     var addrOk = addr.length > 10;
 
