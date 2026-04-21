@@ -367,14 +367,23 @@ class ZeptoAutomation:
         """Read the currently selected delivery address from Zepto's header."""
         try:
             result = self.driver.execute_script("""
-                // The location button in the header shows current address
+                // The delivery address widget in the header has:
+                //   - a location-pin SVG icon
+                //   - multi-line text: label on line 1, truncated address on line 2+
+                //   - sits within the top 100px
                 var btn = Array.from(document.querySelectorAll('button, a, div')).find(function(el) {
                     var rect = el.getBoundingClientRect();
+                    if (rect.top >= 100 || rect.width < 60) return false;
                     var text = (el.innerText || '').trim();
-                    // Top of page, has location-like text, not "Login"
-                    return rect.top < 100 && text.length > 2 && text.length < 80
-                           && text.toLowerCase() !== 'login'
-                           && (el.querySelector('svg') || /deliver|location|home|office|flat|road|street|nagar|colony/i.test(text));
+                    var lines = text.split('\\n').map(function(l){ return l.trim(); }).filter(Boolean);
+                    // Must have at least 2 lines (label + address) and an SVG icon
+                    if (lines.length < 2) return false;
+                    if (!el.querySelector('svg')) return false;
+                    // Exclude nav/action buttons
+                    var first = lines[0].toLowerCase();
+                    if (/^(login|search|menu|cart|back|home page)/.test(first)) return false;
+                    // Text must look like an address widget (reasonable length)
+                    return text.length > 5 && text.length < 150;
                 });
                 return btn ? btn.innerText.trim() : null;
             """)
@@ -547,7 +556,7 @@ class ZeptoAutomation:
 
             # JS didn't find it — try XPath as fallback
             for xpath in [
-                f"//*[normalize-space(translate(text(),'•0123456789abcdefghijklmnopqrstuvwxyz ',''))='{label}']",
+                f"//*[normalize-space(text())='{label}']",
                 f"//*[contains(text(),'{label}')]",
             ]:
                 try:
