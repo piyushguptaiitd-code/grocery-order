@@ -821,17 +821,26 @@ class ZeptoAutomation:
         """Click the cart button and scrape product items above the Bill summary section."""
         try:
             # Click the floating cart pill
-            clicked = self.driver.execute_script("""
-                var btn = Array.from(document.querySelectorAll('button, a, div')).find(function(el) {
-                    var t = (el.innerText || '').trim().toLowerCase();
-                    var rect = el.getBoundingClientRect();
-                    return rect.bottom > window.innerHeight * 0.7
-                        && /^cart/.test(t) && /item/.test(t) && rect.width > 80;
-                });
-                if (btn) { btn.click(); return true; }
-                return false;
-            """)
-            logger.info(f"[BrowserCart] Cart pill clicked: {clicked}")
+            current_url = self.driver.current_url
+            already_on_cart = any(k in current_url for k in ('cart', 'checkout', 'payment'))
+            if already_on_cart:
+                logger.info("[BrowserCart] Already on cart/checkout page — skipping pill click")
+                clicked = True
+            else:
+                clicked = self.driver.execute_script("""
+                    var btn = Array.from(document.querySelectorAll('button, a, div')).find(function(el) {
+                        var t = (el.innerText || '').trim().toLowerCase();
+                        var rect = el.getBoundingClientRect();
+                        return rect.bottom > window.innerHeight * 0.7
+                            && /^cart/.test(t) && /item/.test(t) && rect.width > 80;
+                    });
+                    if (btn) { btn.click(); return true; }
+                    return false;
+                """)
+                logger.info(f"[BrowserCart] Cart pill clicked: {clicked}")
+                if not clicked:
+                    logger.warning("[BrowserCart] No cart pill found and not on cart page — returning empty")
+                    return []
             time.sleep(3)
             self.take_screenshot("/tmp/zepto_cart_view.png")
 
