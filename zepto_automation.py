@@ -129,8 +129,8 @@ class ZeptoAutomation:
                 });
                 if (greeting) return 'logged_in';
 
-                // No Login button found — assume logged in
-                return 'logged_in';
+                // No definitive indicator found — default to logged_out (safer, triggers login flow)
+                return 'logged_out';
             """)
             logger.info(f"[Login] Browser state: {result}")
             return result or 'logged_out'
