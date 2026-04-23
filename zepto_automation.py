@@ -406,66 +406,57 @@ class ZeptoAutomation:
         try:
             self._open_location_modal()
             time.sleep(2)
-            # Wait for modal to be visible and addresses to potentially load
-            for attempt in range(5):
-                modal_ready = self.driver.execute_script("""
-                    var modal = document.querySelector('[role="dialog"],[role="sheet"],[class*="modal"],[class*="drawer"],[class*="bottom-sheet"]');
-                    if (!modal) return false;
-                    // Check if modal has visible content (not just a spinner)
-                    var text = modal.innerText.trim();
-                    return text.length > 10;
+
+            # Wait for "Saved Addresses" heading to appear (confirms modal loaded)
+            for attempt in range(8):
+                heading_visible = self.driver.execute_script("""
+                    return Array.from(document.querySelectorAll('*')).some(function(el) {
+                        return (el.innerText || '').trim().toLowerCase() === 'saved addresses'
+                            && el.getBoundingClientRect().width > 50;
+                    });
                 """)
-                if modal_ready:
-                    logger.info(f"[Addresses] Modal content detected on attempt {attempt + 1}")
+                if heading_visible:
+                    logger.info(f"[Addresses] 'Saved Addresses' heading found on attempt {attempt + 1}")
                     break
                 time.sleep(1)
             else:
-                logger.warning("[Addresses] Modal may not be fully loaded, proceeding anyway")
+                logger.warning("[Addresses] 'Saved Addresses' heading not found — proceeding anyway")
 
-            # Scroll down inside the modal to reveal saved addresses
-            self.driver.execute_script("""
-                var modal = document.querySelector('[role="dialog"],[role="sheet"],[class*="modal"],[class*="drawer"],[class*="bottom-sheet"]');
-                if (modal) modal.scrollTop = 400;
-                else window.scrollBy(0, 400);
-            """)
             time.sleep(1)
             self.take_screenshot("/tmp/zepto_addresses.png")
 
             addresses = self.driver.execute_script("""
-                // Strategy: find all visible elements inside any dialog/modal/sheet
-                // that look like address cards (short label line + longer address line)
-                var modalRoots = Array.from(document.querySelectorAll(
-                    '[role="dialog"], [role="sheet"], [data-testid*="modal"], [data-testid*="drawer"], ' +
-                    '[class*="modal"], [class*="drawer"], [class*="sheet"], [class*="bottom"]'
-                ));
-                // Fallback: use entire document if no modal found
-                var root = modalRoots.length > 0 ? modalRoots[0] : document.body;
+                // Anchor on the "Saved Addresses" heading, then collect cards below it by position
+                var heading = Array.from(document.querySelectorAll('*')).find(function(el) {
+                    return (el.innerText || '').trim().toLowerCase() === 'saved addresses'
+                        && el.getBoundingClientRect().width > 50;
+                });
+                var headingBottom = heading ? heading.getBoundingClientRect().bottom : 0;
 
-                var candidates = Array.from(root.querySelectorAll('*'));
+                var HEADINGS = ['saved addresses','your location','select location',
+                                'add new address','add address','deliver to','addresses','location',
+                                'use my current location'];
                 var seen = {};
                 var result = [];
 
-                candidates.forEach(function(el) {
+                Array.from(document.querySelectorAll('div, li, button')).forEach(function(el) {
+                    var rect = el.getBoundingClientRect();
+                    // Must be below the heading, visible on screen, card-like size
+                    if (rect.top < headingBottom) return;
+                    if (rect.width < 100 || rect.height < 40 || rect.height > 180) return;
+
                     var text = (el.innerText || '').trim();
-                    var lines = text.split('\\n').map(function(l) { return l.trim(); }).filter(Boolean);
+                    var lines = text.split('\\n').map(function(l){ return l.trim(); }).filter(Boolean);
                     if (lines.length < 2) return;
 
-                    // Strip distance indicator e.g. "Home • 1132.6 km" → "Home"
                     var label = lines[0].replace(/\\s*•.*$/, '').trim();
                     var addr = lines.slice(1).join(', ');
 
-                    // Label: short (2-25 chars), not a generic UI heading
                     var labelOk = label.length >= 2 && label.length <= 25;
-                    var HEADINGS = ['saved addresses','your location','select location',
-                                    'add new address','add address','deliver to','addresses','location'];
                     var notHeading = !HEADINGS.some(function(h){ return label.toLowerCase() === h; });
-                    // Address: reasonably long
                     var addrOk = addr.length > 10;
 
-                    var rect = el.getBoundingClientRect();
-                    var visible = rect.width > 60 && rect.height > 15 && rect.height < 200;
-
-                    if (labelOk && notHeading && addrOk && visible && !seen[label]) {
+                    if (labelOk && notHeading && addrOk && !seen[label]) {
                         seen[label] = true;
                         result.push({ label: label, address: addr });
                     }
