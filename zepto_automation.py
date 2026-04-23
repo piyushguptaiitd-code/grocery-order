@@ -405,7 +405,22 @@ class ZeptoAutomation:
         """
         try:
             self._open_location_modal()
-            time.sleep(4)  # Wait for addresses to load asynchronously
+            time.sleep(2)
+            # Wait for modal to be visible and addresses to potentially load
+            for attempt in range(5):
+                modal_ready = self.driver.execute_script("""
+                    var modal = document.querySelector('[role="dialog"],[role="sheet"],[class*="modal"],[class*="drawer"],[class*="bottom-sheet"]');
+                    if (!modal) return false;
+                    // Check if modal has visible content (not just a spinner)
+                    var text = modal.innerText.trim();
+                    return text.length > 10;
+                """)
+                if modal_ready:
+                    logger.info(f"[Addresses] Modal content detected on attempt {attempt + 1}")
+                    break
+                time.sleep(1)
+            else:
+                logger.warning("[Addresses] Modal may not be fully loaded, proceeding anyway")
 
             # Scroll down inside the modal to reveal saved addresses
             self.driver.execute_script("""
@@ -460,14 +475,24 @@ class ZeptoAutomation:
 
             if not addresses:
                 # Dump modal text to help debug
+                self.take_screenshot("/tmp/zepto_address_modal_empty.png")
                 try:
-                    modal_text = self.driver.execute_script("""
+                    modal_info = self.driver.execute_script("""
                         var modal = document.querySelector('[role="dialog"],[role="sheet"],[class*="modal"],[class*="drawer"],[class*="sheet"],[class*="bottom"]');
-                        return modal ? modal.innerText.substring(0, 1000) : document.body.innerText.substring(0, 1000);
+                        if (!modal) return { found: false, page: document.body.innerText.substring(0, 500) };
+                        return {
+                            found: true,
+                            modal_text: modal.innerText.substring(0, 500),
+                            modal_classes: modal.className,
+                            modal_rect: { width: modal.offsetWidth, height: modal.offsetHeight }
+                        };
                     """)
-                    logger.info(f"[Addresses] Modal text dump: {repr(modal_text)}")
-                except Exception:
-                    pass
+                    if modal_info.get('found'):
+                        logger.info(f"[Addresses] Modal found: {modal_info['modal_classes']}, text: {repr(modal_info['modal_text'][:100])}")
+                    else:
+                        logger.warning(f"[Addresses] Modal element not found! Page content: {repr(modal_info.get('page', ''))[:100]}")
+                except Exception as e:
+                    logger.error(f"[Addresses] Modal debug failed: {e}")
 
                 # Hard fallback: grab all text blocks in the modal that look like addresses
                 logger.warning("[Addresses] JS scrape returned nothing — trying text-based fallback")
