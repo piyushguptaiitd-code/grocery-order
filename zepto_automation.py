@@ -193,7 +193,7 @@ class ZeptoAutomation:
                 keep_alive=True,
             )
             llm = ChatAnthropic(
-                model="claude-sonnet-4-6",
+                model="claude-haiku-4-5-20251001",
                 api_key=os.environ.get("ANTHROPIC_API_KEY"),
             )
             kwargs = dict(
