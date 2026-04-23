@@ -196,6 +196,8 @@ class ZeptoAutomation:
                 model="claude-haiku-4-5-20251001",
                 api_key=os.environ.get("ANTHROPIC_API_KEY"),
             )
+            if not hasattr(llm, "provider"):
+                llm.provider = "anthropic"
             kwargs = dict(
                 task=task,
                 llm=llm,
