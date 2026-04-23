@@ -1,8 +1,11 @@
 import json
 import time
+import asyncio
 import logging
+import os
 from dataclasses import dataclass
 from typing import List, Optional
+from pydantic import BaseModel
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -14,6 +17,23 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
 from config import SELENIUM_HEADLESS, SELENIUM_TIMEOUT, ZEPTO_SEARCH_LIMIT, DATABASE_PATH
+
+
+# ── Pydantic models for browser-use structured output ──────────────────────────
+
+class _AddressItem(BaseModel):
+    label: str
+    address: str
+
+class _AddressList(BaseModel):
+    addresses: List[_AddressItem]
+
+class _CartItem(BaseModel):
+    name: str
+    price: str
+
+class _CartContents(BaseModel):
+    items: List[_CartItem]
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +76,8 @@ class ZeptoAutomation:
         options.add_experimental_option("useAutomationExtension", False)
         options.add_argument("--window-size=1280,800")
         options.add_argument("user-agent=Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36")
+        # Allow browser-use to attach via Chrome DevTools Protocol
+        options.add_argument("--remote-debugging-port=9222")
         # Persistent profile so login survives bot restarts
         profile_dir = DATABASE_PATH.replace('.db', '_chrome_profile')
         options.add_argument(f"--user-data-dir={profile_dir}")
@@ -159,6 +181,35 @@ class ZeptoAutomation:
             self.driver = None
             self.is_logged_in = False
             logger.info("Selenium driver stopped")
+
+    def _run_browser_agent(self, task: str, output_model=None):
+        """Run a browser-use Agent against the existing Chrome session via CDP."""
+        from browser_use import Agent, BrowserSession
+        from langchain_anthropic import ChatAnthropic
+
+        async def _run():
+            session = BrowserSession(
+                cdp_url="http://localhost:9222",
+                keep_alive=True,
+            )
+            llm = ChatAnthropic(
+                model="claude-sonnet-4-6",
+                api_key=os.environ.get("ANTHROPIC_API_KEY"),
+            )
+            kwargs = dict(
+                task=task,
+                llm=llm,
+                browser_session=session,
+                max_failures=2,
+                use_vision=True,
+            )
+            if output_model:
+                kwargs["output_model_schema"] = output_model
+            agent = Agent(**kwargs)
+            result = await agent.run()
+            return result.final_result()
+
+        return asyncio.run(_run())
 
     def initiate_login(self, phone: str) -> tuple:
         """
@@ -366,148 +417,56 @@ class ZeptoAutomation:
     def get_current_address(self) -> Optional[dict]:
         """Read the currently selected delivery address from Zepto's header."""
         try:
-            result = self.driver.execute_script("""
-                // The delivery address widget in the header has:
-                //   - a location-pin SVG icon
-                //   - multi-line text: label on line 1, truncated address on line 2+
-                //   - sits within the top 100px
-                var btn = Array.from(document.querySelectorAll('button, a, div')).find(function(el) {
-                    var rect = el.getBoundingClientRect();
-                    if (rect.top >= 100 || rect.width < 60) return false;
-                    var text = (el.innerText || '').trim();
-                    var lines = text.split('\\n').map(function(l){ return l.trim(); }).filter(Boolean);
-                    // Must have at least 2 lines (label + address) and an SVG icon
-                    if (lines.length < 2) return false;
-                    if (!el.querySelector('svg')) return false;
-                    // Exclude nav/action buttons
-                    var first = lines[0].toLowerCase();
-                    if (/^(login|search|menu|cart|back|home page)/.test(first)) return false;
-                    // Text must look like an address widget (reasonable length)
-                    return text.length > 5 && text.length < 150;
-                });
-                return btn ? btn.innerText.trim() : null;
-            """)
-            if result and result.lower() not in ('select location', 'location', ''):
-                label = result.split('\n')[0].strip()
-                logger.info(f"[Address] Current address in header: {repr(result)}")
-                return {"index": 0, "label": label, "address": result}
-            logger.info(f"[Address] No address selected in browser yet (shows: {repr(result)})")
-            return None
+            raw = self._run_browser_agent(
+                "Look at the current Zepto page header. There is a location/address widget near the top. "
+                "What delivery address is currently selected? "
+                "If it shows 'Select Location', 'Select your location', or no address, reply with exactly: none\n"
+                "Otherwise reply with exactly: LABEL|FULL_ADDRESS\n"
+                "For example: Home|1102, Tower 7, M3M Merlin, Sector 67, Gurugram\n"
+                "Do NOT click anything. Just read and reply."
+            )
+            text = str(raw or '').strip()
+            if not text or text.lower() == 'none' or 'select location' in text.lower():
+                logger.info(f"[Address] No address selected in header (agent returned: {repr(text)})")
+                return None
+            if '|' in text:
+                label, addr = text.split('|', 1)
+                label, addr = label.strip(), addr.strip()
+            else:
+                label = text.split('\n')[0].strip()
+                addr = text
+            logger.info(f"[Address] Current address: label={repr(label)}")
+            return {"index": 0, "label": label, "address": addr}
         except Exception as e:
-            logger.warning(f"[Address] Could not read header address: {e}")
+            logger.warning(f"[Address] get_current_address failed: {e}")
             return None
 
     def get_saved_addresses(self) -> tuple:
         """
-        Open Zepto's location modal and scrape saved address cards.
-        Does NOT rely on a 'Saved Addresses' heading — finds cards directly.
+        Open Zepto's location modal and scrape saved address cards via browser-use.
         Returns (success: bool, list of {index, label, address})
         """
         try:
             self._open_location_modal()
-            time.sleep(2)
-
-            # Wait for "Saved Addresses" heading to appear (confirms modal loaded)
-            for attempt in range(8):
-                heading_visible = self.driver.execute_script("""
-                    return Array.from(document.querySelectorAll('*')).some(function(el) {
-                        return (el.innerText || '').trim().toLowerCase() === 'saved addresses'
-                            && el.getBoundingClientRect().width > 50;
-                    });
-                """)
-                if heading_visible:
-                    logger.info(f"[Addresses] 'Saved Addresses' heading found on attempt {attempt + 1}")
-                    break
-                time.sleep(1)
-            else:
-                logger.warning("[Addresses] 'Saved Addresses' heading not found — proceeding anyway")
-
-            time.sleep(1)
+            time.sleep(3)
             self.take_screenshot("/tmp/zepto_addresses.png")
 
-            addresses = self.driver.execute_script("""
-                // Anchor on the "Saved Addresses" heading, then collect cards below it by position
-                var heading = Array.from(document.querySelectorAll('*')).find(function(el) {
-                    return (el.innerText || '').trim().toLowerCase() === 'saved addresses'
-                        && el.getBoundingClientRect().width > 50;
-                });
-                var headingBottom = heading ? heading.getBoundingClientRect().bottom : 0;
+            data = self._run_browser_agent(
+                "The Zepto 'Your Location' modal is currently open. "
+                "Under the 'Saved Addresses' heading there are address cards. "
+                "Each card shows a short label (like 'Home' or 'Bhaiya') and a full street address below it. "
+                "Return ALL saved address cards. Do NOT click anything.",
+                output_model=_AddressList,
+            )
 
-                var HEADINGS = ['saved addresses','your location','select location',
-                                'add new address','add address','deliver to','addresses','location',
-                                'use my current location'];
-                var seen = {};
-                var result = [];
+            if not data or not data.addresses:
+                logger.warning("[Addresses] browser-use returned no addresses")
+                return False, []
 
-                Array.from(document.querySelectorAll('div, li, button')).forEach(function(el) {
-                    var rect = el.getBoundingClientRect();
-                    // Must be below the heading, visible on screen, card-like size
-                    if (rect.top < headingBottom) return;
-                    if (rect.width < 100 || rect.height < 40 || rect.height > 180) return;
-
-                    var text = (el.innerText || '').trim();
-                    var lines = text.split('\\n').map(function(l){ return l.trim(); }).filter(Boolean);
-                    if (lines.length < 2) return;
-
-                    var label = lines[0].replace(/\\s*•.*$/, '').trim();
-                    var addr = lines.slice(1).join(', ');
-
-                    var labelOk = label.length >= 2 && label.length <= 25;
-                    var notHeading = !HEADINGS.some(function(h){ return label.toLowerCase() === h; });
-                    var addrOk = addr.length > 10;
-
-                    if (labelOk && notHeading && addrOk && !seen[label]) {
-                        seen[label] = true;
-                        result.push({ label: label, address: addr });
-                    }
-                });
-                return result.slice(0, 10);
-            """)
-
-            if not addresses:
-                # Dump modal text to help debug
-                self.take_screenshot("/tmp/zepto_address_modal_empty.png")
-                try:
-                    modal_info = self.driver.execute_script("""
-                        var modal = document.querySelector('[role="dialog"],[role="sheet"],[class*="modal"],[class*="drawer"],[class*="sheet"],[class*="bottom"]');
-                        if (!modal) return { found: false, page: document.body.innerText.substring(0, 500) };
-                        return {
-                            found: true,
-                            modal_text: modal.innerText.substring(0, 500),
-                            modal_classes: modal.className,
-                            modal_rect: { width: modal.offsetWidth, height: modal.offsetHeight }
-                        };
-                    """)
-                    if modal_info.get('found'):
-                        logger.info(f"[Addresses] Modal found: {modal_info['modal_classes']}, text: {repr(modal_info['modal_text'][:100])}")
-                    else:
-                        logger.warning(f"[Addresses] Modal element not found! Page content: {repr(modal_info.get('page', ''))[:100]}")
-                except Exception as e:
-                    logger.error(f"[Addresses] Modal debug failed: {e}")
-
-                # Hard fallback: grab all text blocks in the modal that look like addresses
-                logger.warning("[Addresses] JS scrape returned nothing — trying text-based fallback")
-                try:
-                    all_els = self.driver.find_elements(By.XPATH, "//*[string-length(text()) > 5]")
-                    seen = set()
-                    addresses = []
-                    for el in all_els:
-                        try:
-                            if not el.is_displayed():
-                                continue
-                            text = el.text.strip()
-                            lines = [l.strip() for l in text.split('\n') if l.strip()]
-                            clean_label = lines[0].replace('•', '').split('  ')[0].strip()
-                            if len(lines) >= 2 and 2 <= len(clean_label) <= 25 and clean_label not in seen:
-                                seen.add(clean_label)
-                                addresses.append({"label": clean_label, "address": ', '.join(lines[1:])})
-                        except Exception:
-                            continue
-                except Exception as e:
-                    logger.warning(f"[Addresses] Fallback failed: {e}")
-
-            result = [{"index": i, "label": a["label"], "address": a.get("address", "")}
-                      for i, a in enumerate(addresses or [])]
+            result = [
+                {"index": i, "label": a.label, "address": a.address}
+                for i, a in enumerate(data.addresses)
+            ]
             logger.info(f"[Addresses] Found {len(result)}: {[a['label'] for a in result]}")
             return True, result
 
@@ -521,71 +480,17 @@ class ZeptoAutomation:
             self.take_screenshot("/tmp/zepto_addr_before_click.png")
             logger.info(f"[Addresses] Attempting to click address: {label}")
 
-            # JS approach: find any visible element whose text starts with the label,
-            # then walk up to the nearest clickable ancestor (a, button, or li/div with onclick)
-            clicked = self.driver.execute_script("""
-                var label = arguments[0];
-                // Find all text-containing elements whose first line matches label
-                var all = Array.from(document.querySelectorAll('*'));
-                var match = null;
-                for (var i = 0; i < all.length; i++) {
-                    var el = all[i];
-                    var text = (el.innerText || '').trim();
-                    var firstLine = text.split('\\n')[0].replace(/\\s*•.*$/, '').trim();
-                    var rect = el.getBoundingClientRect();
-                    if (firstLine === label && rect.width > 50 && rect.height > 10) {
-                        match = el;
-                        break;
-                    }
-                }
-                if (!match) return 'not_found';
+            self._run_browser_agent(
+                f"The Zepto 'Your Location' modal is open. "
+                f"Click on the saved address card with the label '{label}'. "
+                f"The label is the short name shown on the card (like 'Home' or 'Bhaiya'). "
+                f"Click it to select it as the delivery address and close the modal."
+            )
 
-                // Walk up to the clickable card wrapper
-                var target = match;
-                for (var p = match; p && p !== document.body; p = p.parentElement) {
-                    var tag = (p.tagName || '').toLowerCase();
-                    var rect = p.getBoundingClientRect();
-                    if ((tag === 'a' || tag === 'button' || tag === 'li') && rect.width > 100) {
-                        target = p;
-                        break;
-                    }
-                    // Also accept divs that look like cards (reasonably tall, wide)
-                    if (tag === 'div' && rect.width > 150 && rect.height > 40 && rect.height < 200) {
-                        target = p;
-                        break;
-                    }
-                }
-                try {
-                    target.click();
-                    return 'clicked';
-                } catch(e) {
-                    return 'click_failed:' + e.message;
-                }
-            """, label)
-
-            logger.info(f"[Addresses] select_zepto_address JS result: {clicked}")
             time.sleep(2)
             self.take_screenshot("/tmp/zepto_addr_selected.png")
-
-            if clicked == 'clicked':
-                return True
-
-            # JS didn't find it — try XPath as fallback
-            for xpath in [
-                f"//*[normalize-space(text())='{label}']",
-                f"//*[contains(text(),'{label}')]",
-            ]:
-                try:
-                    el = self.driver.find_element(By.XPATH, xpath)
-                    self.driver.execute_script("arguments[0].click();", el)
-                    time.sleep(2)
-                    logger.info(f"[Addresses] XPath fallback clicked: {label}")
-                    return True
-                except NoSuchElementException:
-                    continue
-
-            logger.error(f"[Addresses] Could not find/click address: {label} (JS: {clicked})")
-            return False
+            logger.info(f"[Addresses] select_zepto_address completed for: {label}")
+            return True
         except Exception as e:
             logger.error(f"[Addresses] select_zepto_address failed: {e}")
             return False
@@ -798,60 +703,34 @@ class ZeptoAutomation:
 
     def get_address_modal_addresses(self) -> List[dict]:
         """
-        Check if Zepto's 'Your Location' modal is open.
-        If so, return saved addresses scraped from it.
+        Check if Zepto's 'Your Location' modal is open and return saved addresses.
+        Uses browser-use to reliably read modal content.
         """
         try:
-            result = self.driver.execute_script("""
-                // Detect the modal by its heading text
-                var modal = Array.from(document.querySelectorAll('div, section')).find(function(el) {
-                    var t = (el.innerText || '').trim();
-                    var rect = el.getBoundingClientRect();
-                    return rect.width > 200 && rect.height > 200
-                        && /your location/i.test(t)
-                        && /saved addresses/i.test(t);
-                });
-                if (!modal) return null;
-
-                // Collect saved address cards — skip utility rows
-                var seen = {};
-                var results = [];
-                Array.from(modal.querySelectorAll('div, li, a')).forEach(function(el) {
-                    var text = (el.innerText || '').trim();
-                    var lines = text.split('\\n').map(function(l){ return l.trim(); }).filter(Boolean);
-                    if (lines.length < 2) return;
-                    var label = lines[0].replace(/•.*$/, '').trim();  // strip "• 1132.6 km"
-                    if (/use my current|add new|search|saved addresses|your location/i.test(label)) return;
-                    if (label.length > 30 || label.length < 2) return;
-                    var rect = el.getBoundingClientRect();
-                    if (rect.width < 150 || rect.height < 30) return;
-                    if (seen[label]) return;
-                    seen[label] = true;
-                    results.push({ label: label, address: lines.slice(1).join(', ') });
-                });
-                return results;
-            """)
-            if result:
-                addresses = [{"index": i, "label": a["label"], "address": a["address"]}
-                             for i, a in enumerate(result)]
-                logger.info(f"[AddressModal] Found {len(addresses)} addresses: {[a['label'] for a in addresses]}")
-                self.take_screenshot("/tmp/zepto_address_modal_detected.png")
-                return addresses
-            return []
+            data = self._run_browser_agent(
+                "Look at the current page. Is the Zepto 'Your Location' modal open? "
+                "If the modal is open, return all saved address cards listed under 'Saved Addresses'. "
+                "If the modal is NOT open, return an empty list.",
+                output_model=_AddressList,
+            )
+            if not data or not data.addresses:
+                return []
+            addresses = [{"index": i, "label": a.label, "address": a.address}
+                         for i, a in enumerate(data.addresses)]
+            logger.info(f"[AddressModal] Found {len(addresses)}: {[a['label'] for a in addresses]}")
+            self.take_screenshot("/tmp/zepto_address_modal_detected.png")
+            return addresses
         except Exception as e:
             logger.warning(f"[AddressModal] check failed: {e}")
             return []
 
     def get_browser_cart(self) -> List[dict]:
-        """Click the cart button and scrape product items above the Bill summary section."""
+        """Navigate to cart and return product items via browser-use."""
         try:
-            # Click the floating cart pill
             current_url = self.driver.current_url
             already_on_cart = any(k in current_url for k in ('cart', 'checkout', 'payment'))
-            if already_on_cart:
-                logger.info("[BrowserCart] Already on cart/checkout page — skipping pill click")
-                clicked = True
-            else:
+            if not already_on_cart:
+                # Click the floating cart pill via Selenium (faster than agent for a button click)
                 clicked = self.driver.execute_script("""
                     var btn = Array.from(document.querySelectorAll('button, a, div')).find(function(el) {
                         var t = (el.innerText || '').trim().toLowerCase();
@@ -862,59 +741,29 @@ class ZeptoAutomation:
                     if (btn) { btn.click(); return true; }
                     return false;
                 """)
-                logger.info(f"[BrowserCart] Cart pill clicked: {clicked}")
                 if not clicked:
                     logger.warning("[BrowserCart] No cart pill found and not on cart page — returning empty")
                     return []
-            time.sleep(3)
+                logger.info("[BrowserCart] Cart pill clicked")
+                time.sleep(3)
+
             self.take_screenshot("/tmp/zepto_cart_view.png")
 
-            # Scrape only items above the "Bill summary" heading
-            raw = self.driver.execute_script("""
-                // Find Bill summary top — everything below it is billing, not products
-                var billEl = Array.from(document.querySelectorAll('*')).find(function(el) {
-                    var t = (el.innerText || '').trim().toLowerCase();
-                    var rect = el.getBoundingClientRect();
-                    return t === 'bill summary' && rect.width > 80;
-                });
-                var billTop = billEl ? billEl.getBoundingClientRect().top : window.innerHeight * 0.75;
+            data = self._run_browser_agent(
+                "On this Zepto cart/checkout page, list all the product items in the cart. "
+                "Each item has a product name and a price. "
+                "Ignore billing rows like 'Item Total', 'Delivery Fee', 'Grand Total', 'Bill Summary', 'Savings'. "
+                "Return only actual grocery/product items.",
+                output_model=_CartContents,
+            )
 
-                var seen = {};
-                var results = [];
-                var candidates = Array.from(document.querySelectorAll('div, li'));
-                candidates.forEach(function(el) {
-                    var rect = el.getBoundingClientRect();
-                    // Only consider elements fully above the Bill summary
-                    if (rect.bottom >= billTop || rect.top < 0) return;
-                    if (rect.width < 80 || rect.height < 40 || rect.height > 250) return;
+            if not data or not data.items:
+                logger.info("[BrowserCart] No items found")
+                return []
 
-                    var text = (el.innerText || '').trim();
-                    var lines = text.split('\\n').map(function(l){ return l.trim(); }).filter(Boolean);
-                    if (!text.includes('₹') || el.children.length < 2 || el.children.length > 20) return;
-
-                    // Name: first line that is not a price/qty/button/discount
-                    var name = lines.find(function(l){
-                        return l.length > 5
-                            && !/^₹/.test(l)
-                            && !/^\\d+$/.test(l)
-                            && !/^(Add|Remove|\\+|-)$/.test(l)
-                            && !/^\\d+\\s*(g|kg|ml|L|pc|pcs|pack)/i.test(l)
-                            && !/OFF$/i.test(l);
-                    });
-                    if (!name) return;
-
-                    var priceMatch = text.match(/₹\\s?([\\d,]+)/);
-                    var price = priceMatch ? priceMatch[1] : '';
-                    var key = name + price;
-                    if (price && !seen[key]) {
-                        seen[key] = true;
-                        results.push({ name: name, price: price });
-                    }
-                });
-                return results.slice(0, 20);
-            """)
-            logger.info(f"[BrowserCart] Found {len(raw or [])} items")
-            return raw or []
+            result = [{"name": item.name, "price": item.price} for item in data.items]
+            logger.info(f"[BrowserCart] Found {len(result)} items")
+            return result
         except Exception as e:
             logger.error(f"[BrowserCart] Failed: {e}")
             return []
